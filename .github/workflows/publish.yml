@@ -16,7 +16,8 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -25,12 +26,16 @@ jobs:
           username: pbarrera86
           password: ${{ secrets.GHCR_PAT }}
 
-
-      - name: Extract n8n version from Dockerfile
+      - name: Extract n8n version from Dockerfile (robust)
         id: ver
+        shell: bash
         run: |
-          VER=$(grep -E '^FROM docker.n8n.io/n8nio/n8n:' Dockerfile | sed 's/FROM docker.n8n.io\/n8nio\/n8n://')
+          VER=$(grep -E '^FROM (docker\.n8n\.io/)?n8nio/n8n:' Dockerfile | tail -n 1 | sed -E 's/^FROM (docker\.n8n\.io\/)?n8nio\/n8n:([^ ]+).*/\2/')
+          if [ -z "$VER" ]; then
+            VER="latest"
+          fi
           echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "Detected version: $VER"
 
       - name: Build and push
         uses: docker/build-push-action@v6
