@@ -23,7 +23,8 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
+
 
       - name: Extract n8n version from Dockerfile
         id: ver
