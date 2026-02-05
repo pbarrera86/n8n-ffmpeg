@@ -8,11 +8,12 @@ RUN mkdir -p /opt/ffmpeg \
   && curl -L "$FFMPEG_URL" | tar -xJ --strip-components=1 -C /opt/ffmpeg \
   && chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe
 
-# ===== Stage 2: n8n (fija versión estable) =====
-FROM docker.n8n.io/n8nio/n8n:2.2.4
+# ===== Stage 2: n8n (versión moderna) =====
+# RECOMENDADO: fijar una versión para estabilidad (cambia cuando quieras)
+FROM docker.n8n.io/n8nio/n8n:latest
 
 USER root
-COPY --from=ffmpeg /opt/ffmpeg/ffmpeg  /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /opt/ffmpeg/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /opt/ffmpeg/ffprobe /usr/local/bin/ffprobe
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
