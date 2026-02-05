@@ -9,7 +9,7 @@ RUN mkdir -p /opt/ffmpeg \
   && chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe
 
 # ===== Stage 2: n8n (moderno) =====
-FROM docker.n8n.io/n8nio/n8n:latest
+FROM docker.n8n.io/n8nio/n8n:2.6.3
 
 USER root
 COPY --from=ffmpeg /opt/ffmpeg/ffmpeg /usr/local/bin/ffmpeg
