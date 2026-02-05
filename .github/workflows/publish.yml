@@ -11,7 +11,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       packages: write
@@ -27,22 +26,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract n8n version from Dockerfile
-        id: ver
-        shell: bash
-        run: |
-          VER=$(grep -E '^FROM (docker\.n8n\.io/)?n8nio/n8n:' Dockerfile | tail -n 1 | sed -E 's/^FROM (docker\.n8n\.io\/)?n8nio\/n8n:([^ ]+).*/\2/')
-          if [ -z "$VER" ]; then
-            VER="latest"
-          fi
-          echo "version=$VER" >> $GITHUB_OUTPUT
-          echo "Detected version: $VER"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
             ${{ env.IMAGE_NAME }}:latest
