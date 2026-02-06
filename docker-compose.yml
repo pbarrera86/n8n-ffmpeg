@@ -15,21 +15,34 @@ services:
       timeout: 5s
       retries: 5
 
-  # ✅ Microservicio que genera MP4 con ffmpeg
+  # ✅ Microservicio que genera MP4 con ffmpeg (ahora soporta slides + audio mp3)
   ffmpeg-api:
     image: ghcr.io/pbarrera86/ffmpeg-api:latest
     restart: unless-stopped
     environment:
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
+      - AUDIO_DIR=/audio
+    volumes:
+      # 📌 Aquí pondrás tus mp3 locales (en el servidor, junto al compose)
+      - ./audios:/audio:ro
+      # 📌 (Recomendado) cache/temporales de ffmpeg
+      - ffmpeg_tmp:/tmp/ffmpeg
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     # 🔒 Recomendado: NO exponer puertos al público (n8n lo llama por red interna)
     # Si quieres probar desde tu PC, descomenta:
     # ports:
     #   - "8088:8080"
+    networks:
+      - internal_net
 
   n8n:
     image: ghcr.io/pbarrera86/n8n-ffmpeg:2.6.3
     restart: unless-stopped
-
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
@@ -79,9 +92,17 @@ services:
       postgres:
         condition: service_healthy
       ffmpeg-api:
-        condition: service_started
+        condition: service_healthy
+
+    networks:
+      - internal_net
 
 volumes:
   n8n_data:
   postgres_data:
   tiktok_ai_data:
+  ffmpeg_tmp:
+
+networks:
+  internal_net:
+    driver: bridge
