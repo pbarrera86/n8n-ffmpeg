@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ✅ Microservicio que genera MP4 con ffmpeg
+  ffmpeg-api:
+    image: ghcr.io/pbarrera86/ffmpeg-api:latest
+    restart: unless-stopped
+    environment:
+      - FFMPEG_API_KEY=${FFMPEG_API_KEY}
+    # 🔒 Recomendado: NO exponer puertos al público (n8n lo llama por red interna)
+    # Si quieres probar desde tu PC, descomenta:
+    # ports:
+    #   - "8088:8080"
+
+  n8n:
+    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.6.3
+    restart: unless-stopped
+
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_POSTGRESDB_SSL=false
+      - DB_POSTGRESDB_SCHEMA=public
+
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${N8N_HOST}/
+
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_SECURE_COOKIE=true
+
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR}
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=${EXECUTIONS_DATA_SAVE_ON_SUCCESS}
+      - EXECUTIONS_DATA_PRUNE=${EXECUTIONS_DATA_PRUNE}
+      - EXECUTIONS_DATA_MAX_AGE=${EXECUTIONS_DATA_MAX_AGE}
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
+      - N8N_CONCURRENCY_PRODUCTION_LIMIT=${N8N_CONCURRENCY_PRODUCTION_LIMIT}
+
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TIKTOK_ACCESS_TOKEN=${TIKTOK_ACCESS_TOKEN}
+
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binaryData
+
+      - N8N_PROXY_HOPS=1
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_USER_FOLDER=/home/node/.n8n
+
+      # ✅ Para que n8n tenga la clave y pueda llamar al microservicio
+      - FFMPEG_API_KEY=${FFMPEG_API_KEY}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - tiktok_ai_data:/data/tiktok_ai
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ffmpeg-api:
+        condition: service_started
+
+volumes:
+  n8n_data:
+  postgres_data:
+  tiktok_ai_data:
