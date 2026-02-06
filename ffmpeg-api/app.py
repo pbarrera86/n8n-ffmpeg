@@ -1,180 +1,103 @@
 import os
 import uuid
 import subprocess
-from typing import List, Optional, Literal
+import textwrap
+from typing import List, Optional
 
-import requests
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+# Para audioUrl (descargar audio). Si no quieres usarlo todavía, puedes quitar requests
+# y dejar solo audioLocal.
+import requests
+
 
 app = FastAPI()
 
 API_KEY = os.getenv("FFMPEG_API_KEY", "")
-WORKDIR = "/tmp/ffmpeg"
-AUDIO_DIR = os.getenv("AUDIO_DIR", "/audio")  # carpeta montada para audios locales
+
+# Carpeta donde montarás mp3 locales (volumen en docker-compose)
+AUDIO_DIR = os.getenv("AUDIO_DIR", "/audio")
 
 
+# -----------------------
+# Modelos
+# -----------------------
 class Slide(BaseModel):
-    text: str = Field(..., description="Texto del slide")
-    durationSec: int = Field(3, ge=1, le=30, description="Duración por slide (1-30s)")
-
-
-class AudioSpec(BaseModel):
-    type: Literal["local", "url"] = "local"
-    # local: path relativo a AUDIO_DIR (ej: "beats/track1.mp3") o absoluto (si quieres)
-    path: Optional[str] = None
-    # url: link directo a mp3
-    url: Optional[str] = None
-    # volumen de 0.0 a 1.0
-    volume: float = Field(0.35, ge=0.0, le=1.0)
+    text: str
+    durationSec: int = 3
 
 
 class VideoRequest(BaseModel):
+    # Compatibilidad: si mandas solo caption, se convierte en 1 slide
     caption: Optional[str] = None
+
+    # Nuevo: slides para video dinámico
     slides: Optional[List[Slide]] = None
 
-    durationSec: int = 15
     width: int = 1080
     height: int = 1920
     fps: int = 30
-    fontSize: int = 48
 
-    title: Optional[str] = None
-    audio: Optional[AudioSpec] = None
+    # Tipografía / layout
+    fontSize: int = 48
+    marginX: int = 90
+    marginY: int = 140
+    lineWidthChars: int = 28
+
+    # -----------------------
+    # Audio (opcional)
+    # -----------------------
+    # 1) audioLocal: nombre de archivo dentro de AUDIO_DIR (ej: "beat.mp3")
+    audioLocal: Optional[str] = None
+
+    # 2) audioUrl: url a mp3 (o m4a/wav, ffmpeg intenta manejarlo)
+    audioUrl: Optional[str] = None
+
+    # 3) audioVolume: volumen (0.0 a 1.0)
+    audioVolume: float = 0.9
+
+    # 4) audioFadeOutSec: aplica un fade out al final (segundos)
+    audioFadeOutSec: int = 1
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "audio_dir": AUDIO_DIR}
 
 
-def _run(cmd: list[str]) -> None:
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=e.stderr.decode("utf-8", errors="ignore")
-        )
+def wrap_text(txt: str, width_chars: int) -> str:
+    txt = (txt or "").strip()
+    if not txt:
+        return ""
+    lines = []
+    for part in txt.splitlines():
+        part = part.strip()
+        if not part:
+            lines.append("")
+            continue
+        lines.append(textwrap.fill(part, width=width_chars))
+    return "\n".join(lines).strip()
 
 
-def _safe_write_text(path: str, text: str) -> None:
-    text = (text or "").strip()[:1400]
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+def safe_filename(name: str) -> str:
+    name = (name or "").strip()
+    name = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_", ".", " "))
+    name = name.replace(" ", "_")
+    while "__" in name:
+        name = name.replace("__", "_")
+    return name[:120]
 
 
-def _render_single_slide(text: str, duration: int, width: int, height: int, fps: int, font_size: int, out_path: str) -> None:
-    os.makedirs(WORKDIR, exist_ok=True)
-    txt_path = os.path.join(WORKDIR, f"{uuid.uuid4()}.txt")
-    _safe_write_text(txt_path, text)
-
-    size = f"{width}x{height}"
-    draw = (
-        f"drawtext=textfile={txt_path}:reload=1:"
-        f"fontcolor=white:fontsize={font_size}:line_spacing=10:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2:"
-        f"box=1:boxcolor=black@0.55:boxborderw=24"
-    )
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={size}:r={fps}:d={duration}",
-        "-vf", draw,
-        "-t", str(duration),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        out_path
-    ]
-    _run(cmd)
-
-
-def _concat_videos(video_paths: list[str], out_path: str) -> None:
-    os.makedirs(WORKDIR, exist_ok=True)
-    list_path = os.path.join(WORKDIR, f"{uuid.uuid4()}.txt")
-    with open(list_path, "w", encoding="utf-8") as f:
-        for p in video_paths:
-            f.write(f"file '{p}'\n")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", list_path,
-        "-c", "copy",
-        out_path
-    ]
-    _run(cmd)
-
-
-def _download_to(path: str, url: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 512):
-                if chunk:
-                    f.write(chunk)
-
-
-def _resolve_audio(audio: AudioSpec) -> str:
-    """Devuelve ruta local a un mp3 listo para usar."""
-    if audio.type == "local":
-        if not audio.path:
-            raise HTTPException(status_code=400, detail="audio.path is required for type=local")
-        # Permite path absoluto o relativo a AUDIO_DIR
-        p = audio.path
-        if not os.path.isabs(p):
-            p = os.path.join(AUDIO_DIR, p)
-        if not os.path.exists(p):
-            raise HTTPException(status_code=400, detail=f"Local audio not found: {p}")
-        return p
-
-    if audio.type == "url":
-        if not audio.url:
-            raise HTTPException(status_code=400, detail="audio.url is required for type=url")
-        # Si es link de drive de compartir, intenta convertirlo a descarga directa (solo si es público)
-        url = audio.url.strip()
-        if "drive.google.com" in url and "uc?export=download" not in url:
-            # intenta extraer el file id
-            file_id = None
-            if "/file/d/" in url:
-                try:
-                    file_id = url.split("/file/d/")[1].split("/")[0]
-                except Exception:
-                    file_id = None
-            if file_id:
-                url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
-        dst = os.path.join(WORKDIR, f"{uuid.uuid4()}.mp3")
-        _download_to(dst, url)
-        return dst
-
-    raise HTTPException(status_code=400, detail="Unsupported audio.type")
-
-
-def _merge_audio(video_path: str, audio_path: str, volume: float, out_path: str) -> None:
-    """
-    Mezcla el audio en el video.
-    - Loopea el audio si es más corto (stream_loop -1)
-    - Corta al largo del video (-shortest)
-    - Convierte audio a AAC para compatibilidad
-    """
-    vol = max(0.0, min(1.0, float(volume)))
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-stream_loop", "-1",
-        "-i", audio_path,
-        "-filter:a", f"volume={vol}",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-shortest",
-        out_path
-    ]
-    _run(cmd)
+def download_audio(url: str, dest_path: str):
+    # Descarga simple con requests
+    r = requests.get(url, timeout=30, stream=True)
+    r.raise_for_status()
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 256):
+            if chunk:
+                f.write(chunk)
 
 
 @app.post("/render")
@@ -184,69 +107,149 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
         if not x_api_key or x_api_key != API_KEY:
             raise HTTPException(status_code=401, detail="Unauthorized")
 
-    os.makedirs(WORKDIR, exist_ok=True)
+    slides = payload.slides or []
+    caption = (payload.caption or "").strip()
+
+    # Regla: o caption o slides
+    if not slides and not caption:
+        raise HTTPException(status_code=400, detail="caption or slides is required")
+
+    # Si no vienen slides, hacemos 1 slide con caption
+    if not slides:
+        slides = [Slide(text=caption, durationSec=15)]
+
+    # Normaliza y recorta slides
+    norm_slides = []
+    for s in slides:
+        t = (s.text or "").strip()
+        if not t:
+            continue
+        t = t[:800]
+        dur = int(s.durationSec or 3)
+        if dur < 1:
+            dur = 1
+        if dur > 15:
+            dur = 15
+        norm_slides.append((t, dur))
+
+    if not norm_slides:
+        raise HTTPException(status_code=400, detail="slides are empty after cleaning")
+
+    # Duración total del video
+    total_duration = sum(d for _, d in norm_slides)
+
+    workdir = "/tmp/ffmpeg"
+    os.makedirs(workdir, exist_ok=True)
+
     job_id = str(uuid.uuid4())
+    out_path = os.path.join(workdir, f"{job_id}.mp4")
 
-    video_no_audio = os.path.join(WORKDIR, f"{job_id}_noaudio.mp4")
-    final_out = os.path.join(WORKDIR, f"{job_id}.mp4")
+    size = f"{payload.width}x{payload.height}"
 
-    # 1) Modo slides (dinámico)
-    if payload.slides and len(payload.slides) > 0:
-        slides = [s for s in payload.slides if (s.text or "").strip()]
-        if not slides:
-            raise HTTPException(status_code=400, detail="slides provided but all texts are empty")
+    # -----------------------
+    # Generación de video por slides (segmentos + concat)
+    # -----------------------
+    inputs = []
+    filter_parts = []
+    concat_inputs = []
 
-        temp_videos: list[str] = []
-        for i, sl in enumerate(slides):
-            tmp_out = os.path.join(WORKDIR, f"{job_id}_{i:02d}.mp4")
-            _render_single_slide(
-                text=sl.text,
-                duration=int(sl.durationSec),
-                width=int(payload.width),
-                height=int(payload.height),
-                fps=int(payload.fps),
-                font_size=int(payload.fontSize),
-                out_path=tmp_out
-            )
-            temp_videos.append(tmp_out)
+    for i, (txt, dur) in enumerate(norm_slides):
+        txt_wrapped = wrap_text(txt, payload.lineWidthChars)
+        txt_path = os.path.join(workdir, f"{job_id}_{i}.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(txt_wrapped)
 
-        _concat_videos(temp_videos, video_no_audio)
+        inputs += [
+            "-f", "lavfi",
+            "-i", f"color=c=black:s={size}:r={payload.fps}:d={dur}"
+        ]
 
-    else:
-        # 2) Modo caption (compatibilidad)
-        caption = (payload.caption or "").strip()
-        if not caption:
-            raise HTTPException(status_code=400, detail="caption is required when slides are not provided")
-
-        txt_path = os.path.join(WORKDIR, f"{job_id}.txt")
-        _safe_write_text(txt_path, caption)
-
-        size = f"{payload.width}x{payload.height}"
         draw = (
-            f"drawtext=textfile={txt_path}:reload=1:"
-            f"fontcolor=white:fontsize={payload.fontSize}:line_spacing=10:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:"
-            f"box=1:boxcolor=black@0.55:boxborderw=24"
+            f"drawtext=textfile='{txt_path}':reload=0:"
+            f"fontcolor=white:fontsize={payload.fontSize}:line_spacing=18:"
+            f"x={payload.marginX}:y={payload.marginY}:"
+            f"box=1:boxcolor=black@0.55:boxborderw=30"
         )
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"color=c=black:s={size}:r={payload.fps}:d={payload.durationSec}",
-            "-vf", draw,
-            "-t", str(payload.durationSec),
+        filter_parts.append(f"[{i}:v]{draw},format=yuv420p[v{i}]")
+        concat_inputs.append(f"[v{i}]")
+
+    n = len(norm_slides)
+    filter_complex_video = ";".join(filter_parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=1:a=0[vout]"
+
+    # -----------------------
+    # Audio opcional (listo para más adelante)
+    # -----------------------
+    audio_path = None
+
+    # Preferimos audioLocal si viene, si no audioUrl
+    if payload.audioLocal:
+        fname = safe_filename(payload.audioLocal)
+        candidate = os.path.join(AUDIO_DIR, fname)
+        if not os.path.isfile(candidate):
+            raise HTTPException(status_code=400, detail=f"audioLocal not found: {candidate}")
+        audio_path = candidate
+
+    elif payload.audioUrl:
+        # Descarga al workdir
+        tmp_audio = os.path.join(workdir, f"{job_id}_audio")
+        try:
+            download_audio(payload.audioUrl, tmp_audio)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"audioUrl download failed: {str(e)}")
+        audio_path = tmp_audio
+
+    # Si hay audio, lo recortamos a duración del video y aplicamos volumen + fade-out
+    # Si NO hay audio, solo video.
+    cmd = ["ffmpeg", "-y", *inputs]
+
+    if audio_path:
+        cmd += ["-i", audio_path]
+
+        # Construimos filter_complex final:
+        # 1) video: [vout]
+        # 2) audio: [a0] = recorta a total_duration, volumen, fadeout
+        # 3) map v y a
+        fade_out = max(0, int(payload.audioFadeOutSec or 0))
+        # start fade out
+        fade_start = max(0, total_duration - fade_out)
+
+        audio_filters = [
+            f"atrim=0:{total_duration}",
+            "asetpts=PTS-STARTPTS",
+            f"volume={float(payload.audioVolume):.3f}",
+        ]
+        if fade_out > 0:
+            audio_filters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
+
+        filter_complex = (
+            filter_complex_video
+            + f";[1:a]{','.join(audio_filters)}[aout]"
+        )
+
+        cmd += [
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-shortest",
+            out_path
+        ]
+    else:
+        cmd += [
+            "-filter_complex", filter_complex_video,
+            "-map", "[vout]",
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            video_no_audio
+            out_path
         ]
-        _run(cmd)
 
-    # 3) Si viene audio, mezclarlo
-    if payload.audio:
-        audio_path = _resolve_audio(payload.audio)
-        _merge_audio(video_no_audio, audio_path, payload.audio.volume, final_out)
-    else:
-        # sin audio: solo renombra/sale
-        final_out = video_no_audio
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=e.stderr.decode("utf-8", errors="ignore"))
 
-    return FileResponse(final_out, media_type="video/mp4", filename="video.mp4")
+    return FileResponse(out_path, media_type="video/mp4", filename="video.mp4")
