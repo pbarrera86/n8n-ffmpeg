@@ -1,19 +1,27 @@
 FROM python:3.11-slim
 
-# ffmpeg = render video + audio
-# curl = healthcheck (si lo usas en docker-compose)
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    curl \
-  && rm -rf /var/lib/apt/lists/*
+    fonts-dejavu-core \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
+    fontconfig \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY app.py /app/
+COPY app.py /app/app.py
+
+ENV FFMPEG_API_KEY="puga_ffmpeg_2026_12345"
+ENV AUDIO_DIR="/audio"
+ENV FONT_FILE="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 EXPOSE 8080
-
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
