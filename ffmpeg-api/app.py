@@ -2,23 +2,25 @@ import os
 import uuid
 import subprocess
 import textwrap
+import re
 from typing import List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-# Para audioUrl (descargar audio). Si no quieres usarlo todavía, puedes quitar requests
-# y dejar solo audioLocal.
 import requests
-
 
 app = FastAPI()
 
+# Tu header en n8n: X-API-Key
 API_KEY = os.getenv("FFMPEG_API_KEY", "")
 
 # Carpeta donde montarás mp3 locales (volumen en docker-compose)
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/audio")
+
+# Fuente (MUY IMPORTANTE). En Dockerfile de abajo instalamos DejaVu + Noto.
+FONT_FILE = os.getenv("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
 
 
 # -----------------------
@@ -41,44 +43,25 @@ class VideoRequest(BaseModel):
     fps: int = 30
 
     # Tipografía / layout
-    fontSize: int = 48
-    marginX: int = 90
-    marginY: int = 140
-    lineWidthChars: int = 28
+    fontSize: int = 52
+    lineWidthChars: int = 34          # ancho de wrap (sube para líneas más largas)
+    maxLines: int = 12                # límite de líneas (para que no se desborde)
+    lineSpacing: int = 14
+    boxAlpha: float = 0.45
+    boxBorder: int = 28
 
     # -----------------------
-    # Audio (opcional)
+    # Audio (opcional, listo)
     # -----------------------
-    # 1) audioLocal: nombre de archivo dentro de AUDIO_DIR (ej: "beat.mp3")
     audioLocal: Optional[str] = None
-
-    # 2) audioUrl: url a mp3 (o m4a/wav, ffmpeg intenta manejarlo)
     audioUrl: Optional[str] = None
-
-    # 3) audioVolume: volumen (0.0 a 1.0)
     audioVolume: float = 0.9
-
-    # 4) audioFadeOutSec: aplica un fade out al final (segundos)
     audioFadeOutSec: int = 1
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "audio_dir": AUDIO_DIR}
-
-
-def wrap_text(txt: str, width_chars: int) -> str:
-    txt = (txt or "").strip()
-    if not txt:
-        return ""
-    lines = []
-    for part in txt.splitlines():
-        part = part.strip()
-        if not part:
-            lines.append("")
-            continue
-        lines.append(textwrap.fill(part, width=width_chars))
-    return "\n".join(lines).strip()
+    return {"ok": True, "audio_dir": AUDIO_DIR, "font_file": FONT_FILE}
 
 
 def safe_filename(name: str) -> str:
@@ -91,7 +74,6 @@ def safe_filename(name: str) -> str:
 
 
 def download_audio(url: str, dest_path: str):
-    # Descarga simple con requests
     r = requests.get(url, timeout=30, stream=True)
     r.raise_for_status()
     with open(dest_path, "wb") as f:
@@ -100,12 +82,135 @@ def download_audio(url: str, dest_path: str):
                 f.write(chunk)
 
 
+def sanitize_text(t: str) -> str:
+    """
+    Evita caracteres que rompen drawtext / fuentes:
+    - controles
+    - emojis (suelen salir como □ si la fuente no los soporta)
+    """
+    if t is None:
+        return ""
+    t = t.replace("\r", " ").strip()
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", t)
+    # quita emojis fuera de BMP
+    t = re.sub(r"[\U00010000-\U0010FFFF]", "", t)
+    return t.strip()
+
+
+def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
+    txt = sanitize_text(txt)
+    if not txt:
+        return ""
+    lines = []
+    for part in txt.splitlines():
+        part = part.strip()
+        if not part:
+            continue
+        lines.extend(textwrap.wrap(part, width=width_chars))
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        # agrega "…"
+        if lines:
+            lines[-1] = (lines[-1][:-1] + "…") if len(lines[-1]) > 1 else "…"
+    return "\n".join(lines).strip()
+
+
+def choose_font_size(base: int, text_len: int) -> int:
+    """
+    Baja fontSize si el texto es largo para evitar cortes.
+    """
+    if text_len <= 90:
+        return base
+    if text_len <= 170:
+        return max(42, base - 10)
+    return max(36, base - 16)
+
+
+def run(cmd: List[str]) -> None:
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr)
+
+
+def render_segment_mp4(
+    out_path: str,
+    text: str,
+    duration: int,
+    width: int,
+    height: int,
+    fps: int,
+    font_size: int,
+    line_width_chars: int,
+    max_lines: int,
+    line_spacing: int,
+    box_alpha: float,
+    box_border: int,
+):
+    wrapped = wrap_text(text, line_width_chars, max_lines)
+
+    txt_path = out_path + ".txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(wrapped)
+
+    # ✅ CENTRADO + caja
+    draw = (
+        f"drawtext=fontfile={FONT_FILE}:textfile='{txt_path}':reload=0:"
+        f"fontcolor=white:fontsize={font_size}:line_spacing={line_spacing}:"
+        f"box=1:boxcolor=black@{box_alpha}:boxborderw={box_border}:"
+        f"x=(w-text_w)/2:y=(h-text_h)/2"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c=black:s={width}x{height}:r={fps}",
+        "-t", str(duration),
+        "-vf", draw,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-r", str(fps),
+        "-movflags", "+faststart",
+        out_path
+    ]
+    run(cmd)
+
+    try:
+        os.remove(txt_path)
+    except Exception:
+        pass
+
+
+def concat_segments_demuxer(segment_paths: List[str], out_path: str):
+    concat_txt = out_path + ".concat.txt"
+    with open(concat_txt, "w", encoding="utf-8") as f:
+        for p in segment_paths:
+            f.write(f"file '{p}'\n")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", concat_txt,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        out_path
+    ]
+    run(cmd)
+
+    try:
+        os.remove(concat_txt)
+    except Exception:
+        pass
+
+
 @app.post("/render")
 def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=None)):
     # Seguridad simple por header
     if API_KEY:
         if not x_api_key or x_api_key != API_KEY:
             raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not os.path.isfile(FONT_FILE):
+        raise HTTPException(status_code=500, detail=f"FONT_FILE no existe: {FONT_FILE}")
 
     slides = payload.slides or []
     caption = (payload.caption or "").strip()
@@ -121,135 +226,109 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
     # Normaliza y recorta slides
     norm_slides = []
     for s in slides:
-        t = (s.text or "").strip()
+        t = sanitize_text(s.text or "")
         if not t:
             continue
         t = t[:800]
         dur = int(s.durationSec or 3)
-        if dur < 1:
-            dur = 1
-        if dur > 15:
-            dur = 15
+        dur = max(1, min(dur, 15))
         norm_slides.append((t, dur))
 
     if not norm_slides:
         raise HTTPException(status_code=400, detail="slides are empty after cleaning")
 
-    # Duración total del video
     total_duration = sum(d for _, d in norm_slides)
 
     workdir = "/tmp/ffmpeg"
     os.makedirs(workdir, exist_ok=True)
 
     job_id = str(uuid.uuid4())
-    out_path = os.path.join(workdir, f"{job_id}.mp4")
-
-    size = f"{payload.width}x{payload.height}"
+    out_final = os.path.join(workdir, f"{job_id}.mp4")
 
     # -----------------------
-    # Generación de video por slides (segmentos + concat)
+    # 1) Render 1 mp4 por slide
+    # 2) Concat por demuxer (más estable)
     # -----------------------
-    inputs = []
-    filter_parts = []
-    concat_inputs = []
-
-    for i, (txt, dur) in enumerate(norm_slides):
-        txt_wrapped = wrap_text(txt, payload.lineWidthChars)
-        txt_path = os.path.join(workdir, f"{job_id}_{i}.txt")
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(txt_wrapped)
-
-        inputs += [
-            "-f", "lavfi",
-            "-i", f"color=c=black:s={size}:r={payload.fps}:d={dur}"
-        ]
-
-        draw = (
-            f"drawtext=textfile='{txt_path}':reload=0:"
-            f"fontcolor=white:fontsize={payload.fontSize}:line_spacing=18:"
-            f"x={payload.marginX}:y={payload.marginY}:"
-            f"box=1:boxcolor=black@0.55:boxborderw=30"
-        )
-
-        filter_parts.append(f"[{i}:v]{draw},format=yuv420p[v{i}]")
-        concat_inputs.append(f"[v{i}]")
-
-    n = len(norm_slides)
-    filter_complex_video = ";".join(filter_parts) + ";" + "".join(concat_inputs) + f"concat=n={n}:v=1:a=0[vout]"
-
-    # -----------------------
-    # Audio opcional (listo para más adelante)
-    # -----------------------
-    audio_path = None
-
-    # Preferimos audioLocal si viene, si no audioUrl
-    if payload.audioLocal:
-        fname = safe_filename(payload.audioLocal)
-        candidate = os.path.join(AUDIO_DIR, fname)
-        if not os.path.isfile(candidate):
-            raise HTTPException(status_code=400, detail=f"audioLocal not found: {candidate}")
-        audio_path = candidate
-
-    elif payload.audioUrl:
-        # Descarga al workdir
-        tmp_audio = os.path.join(workdir, f"{job_id}_audio")
-        try:
-            download_audio(payload.audioUrl, tmp_audio)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"audioUrl download failed: {str(e)}")
-        audio_path = tmp_audio
-
-    # Si hay audio, lo recortamos a duración del video y aplicamos volumen + fade-out
-    # Si NO hay audio, solo video.
-    cmd = ["ffmpeg", "-y", *inputs]
-
-    if audio_path:
-        cmd += ["-i", audio_path]
-
-        # Construimos filter_complex final:
-        # 1) video: [vout]
-        # 2) audio: [a0] = recorta a total_duration, volumen, fadeout
-        # 3) map v y a
-        fade_out = max(0, int(payload.audioFadeOutSec or 0))
-        # start fade out
-        fade_start = max(0, total_duration - fade_out)
-
-        audio_filters = [
-            f"atrim=0:{total_duration}",
-            "asetpts=PTS-STARTPTS",
-            f"volume={float(payload.audioVolume):.3f}",
-        ]
-        if fade_out > 0:
-            audio_filters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
-
-        filter_complex = (
-            filter_complex_video
-            + f";[1:a]{','.join(audio_filters)}[aout]"
-        )
-
-        cmd += [
-            "-filter_complex", filter_complex,
-            "-map", "[vout]",
-            "-map", "[aout]",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-shortest",
-            out_path
-        ]
-    else:
-        cmd += [
-            "-filter_complex", filter_complex_video,
-            "-map", "[vout]",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            out_path
-        ]
-
+    seg_paths = []
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=e.stderr.decode("utf-8", errors="ignore"))
+        for i, (txt, dur) in enumerate(norm_slides):
+            seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
+            fs = choose_font_size(payload.fontSize, len(txt))
+            render_segment_mp4(
+                out_path=seg_path,
+                text=txt,
+                duration=dur,
+                width=payload.width,
+                height=payload.height,
+                fps=payload.fps,
+                font_size=fs,
+                line_width_chars=payload.lineWidthChars,
+                max_lines=payload.maxLines,
+                line_spacing=payload.lineSpacing,
+                box_alpha=float(payload.boxAlpha),
+                box_border=int(payload.boxBorder),
+            )
+            seg_paths.append(seg_path)
 
-    return FileResponse(out_path, media_type="video/mp4", filename="video.mp4")
+        concat_segments_demuxer(seg_paths, out_final)
+
+        # -----------------------
+        # Audio opcional (listo)
+        # -----------------------
+        audio_path = None
+
+        if payload.audioLocal:
+            fname = safe_filename(payload.audioLocal)
+            candidate = os.path.join(AUDIO_DIR, fname)
+            if not os.path.isfile(candidate):
+                raise HTTPException(status_code=400, detail=f"audioLocal not found: {candidate}")
+            audio_path = candidate
+
+        elif payload.audioUrl:
+            tmp_audio = os.path.join(workdir, f"{job_id}_audio")
+            try:
+                download_audio(payload.audioUrl, tmp_audio)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"audioUrl download failed: {str(e)}")
+            audio_path = tmp_audio
+
+        if audio_path:
+            out_with_audio = os.path.join(workdir, f"{job_id}_audio.mp4")
+
+            fade_out = max(0, int(payload.audioFadeOutSec or 0))
+            fade_start = max(0, total_duration - fade_out)
+
+            audio_filters = [
+                f"atrim=0:{total_duration}",
+                "asetpts=PTS-STARTPTS",
+                f"volume={float(payload.audioVolume):.3f}",
+            ]
+            if fade_out > 0:
+                audio_filters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", out_final,
+                "-i", audio_path,
+                "-filter_complex", f"[1:a]{','.join(audio_filters)}[aout]",
+                "-map", "0:v:0",
+                "-map", "[aout]",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-shortest",
+                "-movflags", "+faststart",
+                out_with_audio
+            ]
+            run(cmd)
+            out_final = out_with_audio
+
+        return FileResponse(out_final, media_type="video/mp4", filename="video.mp4")
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # No borro segmentos aquí para no arriesgar lectura concurrente.
+        # Si quieres limpieza, lo hacemos con un cron/cleanup o guardando en /data.
+        pass
