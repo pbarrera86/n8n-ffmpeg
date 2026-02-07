@@ -19,7 +19,7 @@ API_KEY = os.getenv("FFMPEG_API_KEY", "")
 # Carpeta donde montarás mp3 locales (volumen en docker-compose)
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/audio")
 
-# Fuente (MUY IMPORTANTE). En Dockerfile de abajo instalamos DejaVu + Noto.
+# Fuente (MUY IMPORTANTE). En Dockerfile instalamos DejaVu + Noto.
 FONT_FILE = os.getenv("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
 
 
@@ -44,11 +44,22 @@ class VideoRequest(BaseModel):
 
     # Tipografía / layout
     fontSize: int = 52
-    lineWidthChars: int = 34          # ancho de wrap (sube para líneas más largas)
-    maxLines: int = 12                # límite de líneas (para que no se desborde)
+
+    # ✅ márgenes (para ganar ancho y controlar layout desde n8n)
+    marginX: int = 40
+    marginY: int = 120
+
+    # ✅ wrap: si es 0 o <=0, usamos auto-cálculo
+    lineWidthChars: int = 0
+
+    # límite de líneas (para que no se desborde)
+    maxLines: int = 12
+
     lineSpacing: int = 14
     boxAlpha: float = 0.45
-    boxBorder: int = 28
+
+    # ✅ IMPORTANTE: boxBorder grande reduce ancho útil
+    boxBorder: int = 12
 
     # -----------------------
     # Audio (opcional, listo)
@@ -86,7 +97,7 @@ def sanitize_text(t: str) -> str:
     """
     Evita caracteres que rompen drawtext / fuentes:
     - controles
-    - emojis (suelen salir como □ si la fuente no los soporta)
+    - emojis (si la fuente no los soporta salen como □)
     """
     if t is None:
         return ""
@@ -101,17 +112,28 @@ def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
     txt = sanitize_text(txt)
     if not txt:
         return ""
-    lines = []
+
+    lines: List[str] = []
     for part in txt.splitlines():
         part = part.strip()
         if not part:
+            lines.append("")  # conserva saltos
             continue
-        lines.extend(textwrap.wrap(part, width=width_chars))
-    if len(lines) > max_lines:
+        wrapped = textwrap.wrap(part, width=width_chars, break_long_words=False, break_on_hyphens=False)
+        lines.extend(wrapped if wrapped else [""])
+
+    # limpia dobles vacíos al inicio/fin
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    if max_lines > 0 and len(lines) > max_lines:
         lines = lines[:max_lines]
-        # agrega "…"
         if lines:
-            lines[-1] = (lines[-1][:-1] + "…") if len(lines[-1]) > 1 else "…"
+            last = lines[-1]
+            lines[-1] = (last[:-1] + "…") if len(last) > 1 else "…"
+
     return "\n".join(lines).strip()
 
 
@@ -122,14 +144,40 @@ def choose_font_size(base: int, text_len: int) -> int:
     if text_len <= 90:
         return base
     if text_len <= 170:
-        return max(42, base - 10)
-    return max(36, base - 16)
+        return max(40, base - 10)
+    return max(34, base - 16)
 
 
 def run(cmd: List[str]) -> None:
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
         raise RuntimeError(p.stderr)
+
+
+def auto_line_width_chars(
+    width: int,
+    margin_x: int,
+    box_border: int,
+    font_size: int,
+) -> int:
+    """
+    ✅ Calcula automáticamente chars por línea para usar mejor el ancho.
+    Fórmula: usable_px / (font_size * factor)
+    factor 0.56-0.60 suele funcionar bien.
+    """
+    # ancho útil real
+    usable_px = width - (margin_x * 2) - (box_border * 2)
+
+    # factor aproximado de ancho por carácter vs font_size
+    factor = 0.58
+    est = int(usable_px / (font_size * factor))
+
+    # clamp razonable
+    if est < 22:
+        est = 22
+    if est > 90:
+        est = 90
+    return est
 
 
 def render_segment_mp4(
@@ -140,24 +188,32 @@ def render_segment_mp4(
     height: int,
     fps: int,
     font_size: int,
+    margin_x: int,
+    margin_y: int,
     line_width_chars: int,
     max_lines: int,
     line_spacing: int,
     box_alpha: float,
     box_border: int,
 ):
+    # ✅ Auto wrap si line_width_chars <= 0
+    if not line_width_chars or line_width_chars <= 0:
+        line_width_chars = auto_line_width_chars(width, margin_x, box_border, font_size)
+
     wrapped = wrap_text(text, line_width_chars, max_lines)
 
     txt_path = out_path + ".txt"
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(wrapped)
 
-    # ✅ CENTRADO + caja
+    # ✅ Alineación: izquierda pero centrado verticalmente,
+    # usando márgenes para ganar ancho.
+    # Nota: text_w es el ancho del texto renderizado; usamos marginX y marginY.
     draw = (
         f"drawtext=fontfile={FONT_FILE}:textfile='{txt_path}':reload=0:"
         f"fontcolor=white:fontsize={font_size}:line_spacing={line_spacing}:"
         f"box=1:boxcolor=black@{box_alpha}:boxborderw={box_border}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2"
+        f"x={margin_x}:y={margin_y}"
     )
 
     cmd = [
@@ -229,7 +285,7 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
         t = sanitize_text(s.text or "")
         if not t:
             continue
-        t = t[:800]
+        t = t[:900]
         dur = int(s.durationSec or 3)
         dur = max(1, min(dur, 15))
         norm_slides.append((t, dur))
@@ -245,15 +301,25 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
     job_id = str(uuid.uuid4())
     out_final = os.path.join(workdir, f"{job_id}.mp4")
 
-    # -----------------------
-    # 1) Render 1 mp4 por slide
-    # 2) Concat por demuxer (más estable)
-    # -----------------------
     seg_paths = []
     try:
+        # ✅ Clamp de boxBorder: si llega enorme, te come el ancho
+        box_border = int(payload.boxBorder or 0)
+        if box_border < 0:
+            box_border = 0
+        if box_border > 40:
+            box_border = 40
+
+        margin_x = int(payload.marginX or 0)
+        margin_y = int(payload.marginY or 0)
+        margin_x = max(0, min(margin_x, 200))
+        margin_y = max(0, min(margin_y, 400))
+
         for i, (txt, dur) in enumerate(norm_slides):
             seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
-            fs = choose_font_size(payload.fontSize, len(txt))
+
+            fs = choose_font_size(int(payload.fontSize), len(txt))
+
             render_segment_mp4(
                 out_path=seg_path,
                 text=txt,
@@ -262,11 +328,13 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
                 height=payload.height,
                 fps=payload.fps,
                 font_size=fs,
-                line_width_chars=payload.lineWidthChars,
-                max_lines=payload.maxLines,
-                line_spacing=payload.lineSpacing,
+                margin_x=margin_x,
+                margin_y=margin_y,
+                line_width_chars=int(payload.lineWidthChars or 0),
+                max_lines=int(payload.maxLines or 0),
+                line_spacing=int(payload.lineSpacing or 14),
                 box_alpha=float(payload.boxAlpha),
-                box_border=int(payload.boxBorder),
+                box_border=box_border,
             )
             seg_paths.append(seg_path)
 
@@ -330,5 +398,4 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
 
     finally:
         # No borro segmentos aquí para no arriesgar lectura concurrente.
-        # Si quieres limpieza, lo hacemos con un cron/cleanup o guardando en /data.
         pass
