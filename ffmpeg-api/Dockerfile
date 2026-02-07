@@ -5,12 +5,14 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    fonts-dejavu-core \
-    fonts-noto-core \
-    fonts-noto-color-emoji \
     fontconfig \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-dejavu-core \
+    fonts-noto-core \
+    fonts-noto-extra \
+    fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache -f -v
 
 WORKDIR /app
 
@@ -19,7 +21,10 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app.py /app/app.py
 
-ENV FFMPEG_API_KEY="puga_ffmpeg_2026_12345"
+# Directorio para audio local (montable como volumen)
+RUN mkdir -p /audio
+
+# ✅ Mejor pasar FFMPEG_API_KEY por docker-compose / variables de entorno.
 ENV AUDIO_DIR="/audio"
 ENV FONT_FILE="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
