@@ -8,6 +8,7 @@ from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from pydantic import ConfigDict  # pydantic v2
 
 import requests
 
@@ -27,13 +28,17 @@ FONT_FILE = os.getenv("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans.
 # Modelos
 # -----------------------
 class Slide(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     text: str
     durationSec: int = 3
 
 
 class VideoRequest(BaseModel):
+    # ✅ Importante: extra="ignore" para que no truene si n8n manda campos extra
+    model_config = ConfigDict(extra="ignore")
+
     # Compatibilidad: si mandas solo caption, se convierte en 1 slide
-    caption: Optional[str] = None
+    caption: Optional[str] = None  # ✅ opcional (evita 422 "Field required")
 
     # Nuevo: slides para video dinámico
     slides: Optional[List[Slide]] = None
@@ -45,9 +50,9 @@ class VideoRequest(BaseModel):
     # Tipografía / layout
     fontSize: int = 52
 
-    # ✅ márgenes (para ganar ancho y controlar layout desde n8n)
-    marginX: int = 40
-    marginY: int = 120
+    # ✅ márgenes (control desde n8n)
+    marginX: int = 80
+    marginY: int = 140
 
     # ✅ wrap: si es 0 o <=0, usamos auto-cálculo
     lineWidthChars: int = 0
@@ -55,11 +60,11 @@ class VideoRequest(BaseModel):
     # límite de líneas (para que no se desborde)
     maxLines: int = 12
 
-    lineSpacing: int = 14
+    lineSpacing: int = 16
     boxAlpha: float = 0.45
 
     # ✅ IMPORTANTE: boxBorder grande reduce ancho útil
-    boxBorder: int = 12
+    boxBorder: int = 24
 
     # -----------------------
     # Audio (opcional, listo)
@@ -109,6 +114,10 @@ def sanitize_text(t: str) -> str:
 
 
 def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
+    """
+    ✅ Clave: break_long_words=True para que palabras largas (hashtags/URLs)
+    no se salgan del ancho y no se corten en pantalla.
+    """
     txt = sanitize_text(txt)
     if not txt:
         return ""
@@ -119,7 +128,13 @@ def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
         if not part:
             lines.append("")  # conserva saltos
             continue
-        wrapped = textwrap.wrap(part, width=width_chars, break_long_words=False, break_on_hyphens=False)
+
+        wrapped = textwrap.wrap(
+            part,
+            width=width_chars,
+            break_long_words=True,      # ✅ MUY importante
+            break_on_hyphens=False
+        )
         lines.extend(wrapped if wrapped else [""])
 
     # limpia dobles vacíos al inicio/fin
@@ -139,7 +154,7 @@ def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
 
 def choose_font_size(base: int, text_len: int) -> int:
     """
-    Baja fontSize si el texto es largo para evitar cortes.
+    Baja fontSize si el texto es largo para evitar cortes verticales.
     """
     if text_len <= 90:
         return base
@@ -154,29 +169,19 @@ def run(cmd: List[str]) -> None:
         raise RuntimeError(p.stderr)
 
 
-def auto_line_width_chars(
-    width: int,
-    margin_x: int,
-    box_border: int,
-    font_size: int,
-) -> int:
+def auto_line_width_chars(width: int, margin_x: int, box_border: int, font_size: int) -> int:
     """
     ✅ Calcula automáticamente chars por línea para usar mejor el ancho.
-    Fórmula: usable_px / (font_size * factor)
-    factor 0.56-0.60 suele funcionar bien.
+    usable_px / (font_size * factor)
     """
-    # ancho útil real
     usable_px = width - (margin_x * 2) - (box_border * 2)
+    usable_px = max(200, usable_px)
 
-    # factor aproximado de ancho por carácter vs font_size
-    factor = 0.58
+    factor = 0.56  # un poco más agresivo para evitar overflow
     est = int(usable_px / (font_size * factor))
 
     # clamp razonable
-    if est < 22:
-        est = 22
-    if est > 90:
-        est = 90
+    est = max(22, min(est, 90))
     return est
 
 
@@ -206,9 +211,8 @@ def render_segment_mp4(
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(wrapped)
 
-    # ✅ Alineación: izquierda pero centrado verticalmente,
-    # usando márgenes para ganar ancho.
-    # Nota: text_w es el ancho del texto renderizado; usamos marginX y marginY.
+    # ✅ CLAVE: x y y por márgenes (NUNCA centrado con (w-text_w)/2)
+    # Esto evita x negativo cuando una línea es más ancha que el canvas.
     draw = (
         f"drawtext=fontfile={FONT_FILE}:textfile='{txt_path}':reload=0:"
         f"fontcolor=white:fontsize={font_size}:line_spacing={line_spacing}:"
@@ -303,17 +307,14 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
 
     seg_paths = []
     try:
-        # ✅ Clamp de boxBorder: si llega enorme, te come el ancho
+        # ✅ Clamp de boxBorder
         box_border = int(payload.boxBorder or 0)
-        if box_border < 0:
-            box_border = 0
-        if box_border > 40:
-            box_border = 40
+        box_border = max(0, min(box_border, 40))
 
         margin_x = int(payload.marginX or 0)
         margin_y = int(payload.marginY or 0)
-        margin_x = max(0, min(margin_x, 200))
-        margin_y = max(0, min(margin_y, 400))
+        margin_x = max(0, min(margin_x, 220))
+        margin_y = max(0, min(margin_y, 500))
 
         for i, (txt, dur) in enumerate(norm_slides):
             seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
@@ -332,7 +333,7 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
                 margin_y=margin_y,
                 line_width_chars=int(payload.lineWidthChars or 0),
                 max_lines=int(payload.maxLines or 0),
-                line_spacing=int(payload.lineSpacing or 14),
+                line_spacing=int(payload.lineSpacing or 16),
                 box_alpha=float(payload.boxAlpha),
                 box_border=box_border,
             )
