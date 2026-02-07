@@ -22,20 +22,23 @@ services:
     environment:
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
       - AUDIO_DIR=/audio
+      - FONT_FILE=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
     volumes:
-      - ./audios:/audio:ro
+      # ✅ Si solo vas a leer mp3 manuales, deja :ro
+      # - ./audios:/audio:ro
+      # ✅ Si quieres que en el futuro n8n/otro proceso pueda escribir mp3 aquí:
+      - ./audios:/audio:rw
+
       - ffmpeg_tmp:/tmp/ffmpeg
     healthcheck:
-      # ✅ Sin curl (evita "unhealthy" si curl no existe en la imagen)
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 20s
-    # ports:
-    #   - "8088:8080"
     networks:
       - internal_net
+
 
   n8n:
     image: ghcr.io/pbarrera86/n8n-ffmpeg:2.6.3
