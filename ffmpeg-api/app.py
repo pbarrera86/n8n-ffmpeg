@@ -3,7 +3,9 @@ import uuid
 import subprocess
 import textwrap
 import re
-from typing import List, Optional
+import math
+import unicodedata
+from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -100,22 +102,46 @@ def download_audio(url: str, dest_path: str):
 
 def sanitize_text(t: str) -> str:
     """
-    Evita caracteres que rompen drawtext / fuentes:
-    - controles
-    - emojis (si la fuente no los soporta salen como □)
+    Limpia caracteres que rompen drawtext / fuentes y elimina símbolos raros:
+    - normaliza unicode (NFKC)
+    - normaliza saltos
+    - NBSP -> espacio normal (evita 'Â')
+    - quita controles ASCII
+    - quita invisibles/bidi comunes (zero-width, etc.)
+    - quita emojis fuera de BMP (si la fuente no los soporta pueden salir como □)
+    - normaliza espacios
     """
     if t is None:
         return ""
-    t = t.replace("\r", " ").strip()
+
+    # Normaliza unicode (reduce combinaciones raras)
+    t = unicodedata.normalize("NFKC", str(t))
+
+    # Normaliza saltos
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+
+    # NBSP -> espacio normal
+    t = t.replace("\u00A0", " ")
+
+    # Quita controles ASCII
     t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", t)
-    # quita emojis fuera de BMP
+
+    # Quita invisibles / bidi que suelen colarse desde web/docs
+    t = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F]", "", t)
+
+    # Quita emojis fuera de BMP
     t = re.sub(r"[\U00010000-\U0010FFFF]", "", t)
+
+    # Normaliza espacios (sin matar saltos de línea)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
     return t.strip()
 
 
 def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
     """
-    ✅ Clave: break_long_words=True para que palabras largas (hashtags/URLs)
+    break_long_words=True para que palabras largas (hashtags/URLs)
     no se salgan del ancho y no se corten en pantalla.
     """
     txt = sanitize_text(txt)
@@ -143,6 +169,7 @@ def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
     while lines and lines[-1] == "":
         lines.pop()
 
+    # recorta por max_lines (si aplica)
     if max_lines > 0 and len(lines) > max_lines:
         lines = lines[:max_lines]
         if lines:
@@ -150,17 +177,6 @@ def wrap_text(txt: str, width_chars: int, max_lines: int) -> str:
             lines[-1] = (last[:-1] + "…") if len(last) > 1 else "…"
 
     return "\n".join(lines).strip()
-
-
-def choose_font_size(base: int, text_len: int) -> int:
-    """
-    Baja fontSize si el texto es largo para evitar cortes verticales.
-    """
-    if text_len <= 90:
-        return base
-    if text_len <= 170:
-        return max(40, base - 10)
-    return max(34, base - 16)
 
 
 def run(cmd: List[str]) -> None:
@@ -171,18 +187,89 @@ def run(cmd: List[str]) -> None:
 
 def auto_line_width_chars(width: int, margin_x: int, box_border: int, font_size: int) -> int:
     """
-    ✅ Calcula automáticamente chars por línea para usar mejor el ancho.
+    Calcula automáticamente chars por línea para usar mejor el ancho.
     usable_px / (font_size * factor)
+
+    Nota: factor más agresivo = líneas más cortas (menos riesgo de overflow)
     """
     usable_px = width - (margin_x * 2) - (box_border * 2)
-    usable_px = max(200, usable_px)
+    usable_px = max(240, usable_px)
 
-    factor = 0.56  # un poco más agresivo para evitar overflow
+    factor = 0.58  # conservador para evitar que el texto toque bordes
     est = int(usable_px / (font_size * factor))
 
-    # clamp razonable
-    est = max(22, min(est, 90))
+    # clamp razonable: en vertical 1080x1920 conviene <= ~36 típicamente
+    est = max(16, min(est, 42))
     return est
+
+
+def max_lines_fit_in_height(height: int, margin_y: int, box_border: int, font_size: int, line_spacing: int) -> int:
+    """
+    Estima cuántas líneas caben verticalmente en el área útil.
+    """
+    usable_h = height - (margin_y * 2) - (box_border * 2)
+    usable_h = max(200, usable_h)
+    line_h = max(1, font_size + line_spacing)
+    return max(1, int(usable_h / line_h))
+
+
+def fit_text_layout(
+    text: str,
+    width: int,
+    height: int,
+    base_font_size: int,
+    margin_x: int,
+    margin_y: int,
+    line_width_chars: int,
+    max_lines: int,
+    line_spacing: int,
+    box_border: int,
+) -> Tuple[str, int, int, int]:
+    """
+    Ajusta automáticamente para que:
+    - no se corte horizontalmente (wrap adecuado)
+    - no se corte verticalmente (reduce font size si hay demasiadas líneas)
+    Devuelve: (wrapped_text, final_font_size, final_line_width_chars, effective_max_lines)
+    """
+    text = sanitize_text(text)
+
+    # límite de seguridad
+    if len(text) > 1200:
+        text = text[:1200].rstrip() + "…"
+
+    fs = max(26, int(base_font_size))
+    for _ in range(8):  # iteraciones de ajuste
+        # max líneas que CABEN por altura
+        lines_fit = max_lines_fit_in_height(height, margin_y, box_border, fs, line_spacing)
+        eff_max_lines = min(max_lines if max_lines > 0 else lines_fit, lines_fit)
+
+        lw = int(line_width_chars or 0)
+        if lw <= 0:
+            lw = auto_line_width_chars(width, margin_x, box_border, fs)
+        else:
+            # clamp defensivo
+            lw = max(12, min(lw, 60))
+
+        wrapped = wrap_text(text, lw, eff_max_lines)
+
+        # Si wrap_text recortó, normalmente ya cabe; si aún así está muy “apretado”
+        # (muchas líneas), reducimos tamaño para mejorar legibilidad
+        num_lines = wrapped.count("\n") + (1 if wrapped else 0)
+
+        if num_lines <= eff_max_lines:
+            return wrapped, fs, lw, eff_max_lines
+
+        # reduce fuente y reintenta
+        fs = max(26, fs - 4)
+
+    # fallback
+    lw = int(line_width_chars or 0)
+    if lw <= 0:
+        lw = auto_line_width_chars(width, margin_x, box_border, fs)
+    lines_fit = max_lines_fit_in_height(height, margin_y, box_border, fs, line_spacing)
+    eff_max_lines = min(max_lines if max_lines > 0 else lines_fit, lines_fit)
+    wrapped = wrap_text(text, lw, eff_max_lines)
+    return wrapped, fs, lw, eff_max_lines
 
 
 def render_segment_mp4(
@@ -192,7 +279,7 @@ def render_segment_mp4(
     width: int,
     height: int,
     fps: int,
-    font_size: int,
+    base_font_size: int,
     margin_x: int,
     margin_y: int,
     line_width_chars: int,
@@ -201,23 +288,35 @@ def render_segment_mp4(
     box_alpha: float,
     box_border: int,
 ):
-    # ✅ Auto wrap si line_width_chars <= 0
-    if not line_width_chars or line_width_chars <= 0:
-        line_width_chars = auto_line_width_chars(width, margin_x, box_border, font_size)
-
-    wrapped = wrap_text(text, line_width_chars, max_lines)
+    wrapped, font_size, final_lw, eff_max_lines = fit_text_layout(
+        text=text,
+        width=width,
+        height=height,
+        base_font_size=base_font_size,
+        margin_x=margin_x,
+        margin_y=margin_y,
+        line_width_chars=line_width_chars,
+        max_lines=max_lines,
+        line_spacing=line_spacing,
+        box_border=box_border,
+    )
 
     txt_path = out_path + ".txt"
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(wrapped)
 
-    # ✅ CLAVE: x y y por márgenes (NUNCA centrado con (w-text_w)/2)
-    # Esto evita x negativo cuando una línea es más ancha que el canvas.
+    # ✅ Ajuste anti-corte:
+    # - fix_bounds=1 evita clipping
+    # - x/y incluyen box_border para que la caja no invada el borde del video
+    x_pos = margin_x + box_border
+    y_pos = margin_y + box_border
+
     draw = (
         f"drawtext=fontfile={FONT_FILE}:textfile='{txt_path}':reload=0:"
         f"fontcolor=white:fontsize={font_size}:line_spacing={line_spacing}:"
         f"box=1:boxcolor=black@{box_alpha}:boxborderw={box_border}:"
-        f"x={margin_x}:y={margin_y}"
+        f"fix_bounds=1:"
+        f"x={x_pos}:y={y_pos}"
     )
 
     cmd = [
@@ -273,7 +372,7 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
         raise HTTPException(status_code=500, detail=f"FONT_FILE no existe: {FONT_FILE}")
 
     slides = payload.slides or []
-    caption = (payload.caption or "").strip()
+    caption = sanitize_text(payload.caption or "")
 
     # Regla: o caption o slides
     if not slides and not caption:
@@ -284,13 +383,13 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
         slides = [Slide(text=caption, durationSec=15)]
 
     # Normaliza y recorta slides
-    norm_slides = []
-    for s in slides:
-        t = sanitize_text(s.text or "")
+    norm_slides: List[Tuple[str, int]] = []
+    for sld in slides:
+        t = sanitize_text(sld.text or "")
         if not t:
             continue
-        t = t[:900]
-        dur = int(s.durationSec or 3)
+        t = t[:1200]  # seguridad
+        dur = int(sld.durationSec or 3)
         dur = max(1, min(dur, 15))
         norm_slides.append((t, dur))
 
@@ -307,19 +406,23 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
 
     seg_paths = []
     try:
-        # ✅ Clamp de boxBorder
+        # ✅ Clamps defensivos
         box_border = int(payload.boxBorder or 0)
-        box_border = max(0, min(box_border, 40))
+        box_border = max(0, min(box_border, 80))
 
         margin_x = int(payload.marginX or 0)
         margin_y = int(payload.marginY or 0)
-        margin_x = max(0, min(margin_x, 220))
-        margin_y = max(0, min(margin_y, 500))
+        margin_x = max(0, min(margin_x, 260))
+        margin_y = max(0, min(margin_y, 600))
+
+        # Evita márgenes absurdos que dejen sin área útil
+        if payload.width - (margin_x * 2) - (box_border * 2) < 240:
+            margin_x = max(0, int((payload.width - 240 - (box_border * 2)) / 2))
+        if payload.height - (margin_y * 2) - (box_border * 2) < 240:
+            margin_y = max(0, int((payload.height - 240 - (box_border * 2)) / 2))
 
         for i, (txt, dur) in enumerate(norm_slides):
             seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
-
-            fs = choose_font_size(int(payload.fontSize), len(txt))
 
             render_segment_mp4(
                 out_path=seg_path,
@@ -328,7 +431,7 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
                 width=payload.width,
                 height=payload.height,
                 fps=payload.fps,
-                font_size=fs,
+                base_font_size=int(payload.fontSize),
                 margin_x=margin_x,
                 margin_y=margin_y,
                 line_width_chars=int(payload.lineWidthChars or 0),
@@ -342,7 +445,7 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
         concat_segments_demuxer(seg_paths, out_final)
 
         # -----------------------
-        # Audio opcional (listo)
+        # Audio opcional
         # -----------------------
         audio_path = None
 
