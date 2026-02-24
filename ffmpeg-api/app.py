@@ -50,7 +50,7 @@ class VideoRequest(BaseModel):
     boxAlpha:       float = 0.55
     boxBorder:      int   = 40
 
-    output:         Optional[str] = None
+    output:         Optional[str] = None   # nombre del archivo de salida
     audioLocal:     Optional[str] = None
     audioUrl:       Optional[str] = None
     audioVolume:    float = 0.9
@@ -415,7 +415,8 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
             run(cmd)
             out_final = out_with_audio
 
-       safe_out = safe_filename(payload.output or "") or "video"
+        # ── Nombre del archivo de salida ───────────────
+        safe_out = safe_filename(payload.output or "") or "video"
         if not safe_out.endswith(".mp4"):
             safe_out += ".mp4"
         return FileResponse(out_final, media_type="video/mp4", filename=safe_out)
