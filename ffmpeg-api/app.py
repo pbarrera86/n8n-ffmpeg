@@ -7,8 +7,7 @@ from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
 
 import requests
 import json
@@ -21,6 +20,11 @@ AUDIO_DIR         = os.getenv("AUDIO_DIR", "/audio")
 IMAGE_DIR         = os.getenv("IMAGE_DIR", "/images")
 FONT_FILE         = os.getenv("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 FONT_FILE_REGULAR = os.getenv("FONT_FILE_REGULAR", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+
+# TTS defaults (Español México / Latino)
+TTS_DEFAULT_VOICE  = os.getenv("TTS_DEFAULT_VOICE", "es-la")  # recomendación: es-la
+TTS_DEFAULT_SPEED  = int(os.getenv("TTS_DEFAULT_SPEED", "170"))
+TTS_DEFAULT_VOLUME = int(os.getenv("TTS_DEFAULT_VOLUME", "100"))
 
 
 # ─────────────────────────────────────────────
@@ -64,9 +68,22 @@ class VideoRequest(BaseModel):
     audioFadeOutSec: int   = 1
 
 
+class TTSRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    text: str
+    voice: str = TTS_DEFAULT_VOICE   # "es-la" por default (latam)
+    speed: int = TTS_DEFAULT_SPEED   # 80-450 (espeak)
+    volume: int = TTS_DEFAULT_VOLUME # 0-200 (espeak)
+    outFormat: str = "mp3"           # "wav" o "mp3"
+
+
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
 def safe_filename(name: str) -> str:
     name = (name or "").strip()
     name = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_", ".", " "))
@@ -102,6 +119,59 @@ def run(cmd: List[str]) -> None:
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
         raise RuntimeError(p.stderr[-3000:])
+
+
+def choose_espeak_voice(raw_voice: str) -> str:
+    """
+    Normaliza la voz para "Español México".
+    espeak-ng suele manejar mejor:
+      - es-la (LatAm)  ✅ recomendado
+      - es (España)
+    Si te pasan "es-mx", lo mapeamos a es-la como fallback seguro.
+    """
+    v = (raw_voice or "").strip().lower()
+    if not v:
+        return TTS_DEFAULT_VOICE
+    if v in ("es-mx", "es_mx", "mx", "mexico", "es-méxico", "es_mexico"):
+        return "es-la"
+    return v
+
+
+def tts_to_wav_espeak(text: str, wav_path: str, voice: str = "es-la", speed: int = 170, volume: int = 100):
+    """
+    Genera WAV usando espeak-ng (requiere espeak-ng instalado en el contenedor).
+    """
+    text = sanitize_text(text)
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    voice = choose_espeak_voice(voice)
+    speed = max(80, min(int(speed), 450))
+    volume = max(0, min(int(volume), 200))
+
+    cmd = [
+        "espeak-ng",
+        "-v", str(voice),
+        "-s", str(speed),
+        "-a", str(volume),
+        "-w", wav_path,
+        text
+    ]
+    run(cmd)
+
+
+def wav_to_mp3(wav_path: str, mp3_path: str):
+    """
+    Convierte WAV a MP3 usando FFmpeg.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", wav_path,
+        "-codec:a", "libmp3lame",
+        "-q:a", "3",
+        mp3_path
+    ]
+    run(cmd)
 
 
 def resolve_bg_image(
@@ -152,7 +222,7 @@ def render_slide_png(
     font      = None
     lines     = []
 
-    for attempt in range(12):
+    for _ in range(12):
         try:
             font = ImageFont.truetype(FONT_FILE, font_size)
         except Exception:
@@ -335,7 +405,7 @@ def _process(
         margin_y = (payload.height - 200) // 2
 
     workdir   = "/tmp/ffmpeg"
-    os.makedirs(workdir, exist_ok=True)
+    ensure_dir(workdir)
     job_id    = str(uuid.uuid4())
     out_final = os.path.join(workdir, f"{job_id}.mp4")
 
@@ -442,6 +512,8 @@ def _process(
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
+        # OJO: no borramos out_final aquí para no romper FileResponse.
+        # Limpieza de PNG/temporales:
         for p in png_paths:
             try:
                 os.remove(p)
@@ -459,7 +531,54 @@ def _process(
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"ok": True, "audio_dir": AUDIO_DIR, "image_dir": IMAGE_DIR, "font_file": FONT_FILE}
+    return {
+        "ok": True,
+        "audio_dir": AUDIO_DIR,
+        "image_dir": IMAGE_DIR,
+        "font_file": FONT_FILE,
+        "tts_default_voice": TTS_DEFAULT_VOICE
+    }
+
+
+@app.post("/tts")
+def tts(req: TTSRequest, x_api_key: str | None = Header(default=None)):
+    """
+    Genera audio desde texto.
+    - WAV (espeak-ng)
+    - MP3 (ffmpeg, libmp3lame)
+
+    Body ejemplo:
+      { "text":"Hola mundo", "voice":"es-la", "speed":170, "volume":100, "outFormat":"mp3" }
+    """
+    if API_KEY:
+        if not x_api_key or x_api_key != API_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    workdir = "/tmp/ffmpeg"
+    ensure_dir(workdir)
+    job_id = str(uuid.uuid4())
+
+    wav_path = os.path.join(workdir, f"{job_id}.wav")
+    mp3_path = os.path.join(workdir, f"{job_id}.mp3")
+
+    try:
+        tts_to_wav_espeak(
+            text=req.text,
+            wav_path=wav_path,
+            voice=req.voice or TTS_DEFAULT_VOICE,
+            speed=req.speed,
+            volume=req.volume,
+        )
+
+        out_fmt = (req.outFormat or "mp3").lower().strip()
+        if out_fmt == "wav":
+            return FileResponse(wav_path, media_type="audio/wav", filename="tts.wav")
+
+        wav_to_mp3(wav_path, mp3_path)
+        return FileResponse(mp3_path, media_type="audio/mpeg", filename="tts.mp3")
+
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/render")
@@ -481,7 +600,7 @@ async def render_video_with_audio(
         raise HTTPException(status_code=422, detail=f"payload JSON inválido: {e}")
 
     workdir   = "/tmp/ffmpeg"
-    os.makedirs(workdir, exist_ok=True)
+    ensure_dir(workdir)
     ext       = os.path.splitext(audio_file.filename or ".mp3")[1] or ".mp3"
     tmp_audio = os.path.join(workdir, f"{uuid.uuid4()}_upload{ext}")
     contents  = await audio_file.read()
@@ -511,7 +630,7 @@ async def render_video_with_image(
         raise HTTPException(status_code=422, detail=f"payload JSON inválido: {e}")
 
     workdir = "/tmp/ffmpeg"
-    os.makedirs(workdir, exist_ok=True)
+    ensure_dir(workdir)
     job_id  = str(uuid.uuid4())
 
     # Imagen opcional
