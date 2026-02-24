@@ -15,23 +15,6 @@ services:
       timeout: 5s
       retries: 5
 
-  piper-tts:
-    image: artibex/piper-http:latest
-    restart: unless-stopped
-    environment:
-      - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
-    volumes:
-      - ./piper_models:/models:rw
-    command: ["python", "/app/run.py", "${PIPER_MODEL_DOWNLOAD_LINK}", "/models"]
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/voices >/dev/null 2>&1 || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
-    networks:
-      - internal_net
-
   ffmpeg-api:
     build:
       context: ./ffmpeg-api
@@ -50,6 +33,23 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
       interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - internal_net
+
+  piper-tts:
+    image: artibex/piper-http:latest
+    restart: unless-stopped
+    environment:
+      - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
+    volumes:
+      - ./piper_models:/models:rw
+    command: ["python", "/app/run.py", "${PIPER_MODEL_DOWNLOAD_LINK}", "/models"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/voices >/dev/null 2>&1 || exit 1"]
+      interval: 20s
       timeout: 10s
       retries: 10
       start_period: 60s
