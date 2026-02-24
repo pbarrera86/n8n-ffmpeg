@@ -14,6 +14,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - internal_net
 
   ffmpeg-api:
     build:
@@ -23,12 +25,12 @@ services:
     environment:
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
       - AUDIO_DIR=/audio
-      - IMAGE_DIR=/images                                        # ← NUEVO
+      - IMAGE_DIR=/images
       - FONT_FILE=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
       - FONT_FILE_REGULAR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
     volumes:
       - ./audios:/audio:rw
-      - ./images:/images:rw                                      # ← NUEVO
+      - ./images:/images:rw
       - ffmpeg_tmp:/tmp/ffmpeg
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
@@ -46,22 +48,30 @@ services:
       - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
       - ./piper_models:/app/models:rw
-    command: >
-      sh -lc "
-      # espera un poco por si está descargando
-      sleep 2;
+    command:
+      - sh
+      - -lc
+      - |
+        echo "[piper] waiting for model files...";
+        i=0;
+        while [ ! -f /app/models/model.onnx.json ] && [ $i -lt 120 ]; do
+          i=$((i+1));
+          sleep 1;
+        done;
 
-      # Parchea el JSON (si existe) para que Piper lo acepte
-      if [ -f /app/models/model.onnx.json ]; then
-        sed -i 's/\"phoneme_type\"[[:space:]]*:[[:space:]]*\"PhonemeType\\.ESPEAK\"/\"phoneme_type\": \"espeak\"/g' /app/models/model.onnx.json;
-      fi;
+        if [ -f /app/models/model.onnx.json ]; then
+          echo "[piper] patching phoneme_type...";
+          sed -i 's/"phoneme_type"[[:space:]]*:[[:space:]]*"PhonemeType\.ESPEAK"/"phoneme_type": "espeak"/g' /app/models/model.onnx.json;
+        else
+          echo "[piper] model.onnx.json NOT found after waiting. Listing /app/models:";
+          ls -la /app/models || true;
+        fi;
 
-      # Arranca el servidor HTTP de Piper
-      python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
-      "
+        echo "[piper] starting server...";
+        python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
     networks:
       - internal_net
-      
+
   n8n:
     image: ghcr.io/pbarrera86/n8n-ffmpeg:2.6.3
     restart: unless-stopped
@@ -96,7 +106,6 @@ services:
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_USER_FOLDER=/home/node/.n8n
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
-      - PIPER_MODEL_DOWNLOAD_LINK=PEGA_AQUI_LINK_DIRECTO_DEL_MODELO.onnx
     volumes:
       - n8n_data:/home/node/.n8n
       - tiktok_ai_data:/data/tiktok_ai
@@ -105,7 +114,6 @@ services:
         condition: service_healthy
       ffmpeg-api:
         condition: service_healthy
-
     networks:
       - internal_net
 
