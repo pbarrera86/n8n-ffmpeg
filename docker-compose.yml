@@ -15,6 +15,23 @@ services:
       timeout: 5s
       retries: 5
 
+  piper-tts:
+    image: artibex/piper-http:latest
+    restart: unless-stopped
+    environment:
+      - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
+    volumes:
+      - ./piper_models:/models:rw
+    command: ["python", "/app/run.py", "${PIPER_MODEL_DOWNLOAD_LINK}", "/models"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/voices >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - internal_net
+
   ffmpeg-api:
     build:
       context: ./ffmpeg-api
@@ -73,6 +90,7 @@ services:
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_USER_FOLDER=/home/node/.n8n
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
+      - PIPER_MODEL_DOWNLOAD_LINK=PEGA_AQUI_LINK_DIRECTO_DEL_MODELO.onnx
     volumes:
       - n8n_data:/home/node/.n8n
       - tiktok_ai_data:/data/tiktok_ai
@@ -80,6 +98,8 @@ services:
       postgres:
         condition: service_healthy
       ffmpeg-api:
+        condition: service_healthy
+      piper-tts:
         condition: service_healthy
     networks:
       - internal_net
