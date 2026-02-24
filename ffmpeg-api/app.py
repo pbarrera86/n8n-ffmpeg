@@ -30,8 +30,8 @@ class Slide(BaseModel):
     model_config = ConfigDict(extra="ignore")
     text:         str
     durationSec:  int           = 3
-    bgImageUrl:   Optional[str] = None   # URL pública de imagen de fondo para este slide
-    bgImageLocal: Optional[str] = None   # nombre de archivo en IMAGE_DIR
+    bgImageUrl:   Optional[str] = None
+    bgImageLocal: Optional[str] = None
 
 
 class VideoRequest(BaseModel):
@@ -53,15 +53,13 @@ class VideoRequest(BaseModel):
     boxAlpha:        float = 0.55
     boxBorder:       int   = 40
 
-    output:          Optional[str] = None   # nombre del archivo de salida
+    output:          Optional[str] = None
 
-    # Imagen de fondo global (aplica a slides sin bgImage propio)
     bgImageUrl:      Optional[str] = None
     bgImageLocal:    Optional[str] = None
 
-    # Audio
-    audioLocal:      Optional[str] = None   # archivo en AUDIO_DIR
-    audioUrl:        Optional[str] = None   # URL pública
+    audioLocal:      Optional[str] = None
+    audioUrl:        Optional[str] = None
     audioVolume:     float = 0.9
     audioFadeOutSec: int   = 1
 
@@ -113,7 +111,6 @@ def resolve_bg_image(
     job_id: str,
     suffix: str,
 ) -> Optional[str]:
-    """Devuelve ruta local de imagen de fondo. Prioridad: URL > local > None."""
     if bg_url:
         dest = os.path.join(workdir, f"{job_id}_bg_{suffix}.jpg")
         try:
@@ -213,7 +210,6 @@ def render_slide_png(
 
         font_size = max(22, font_size - 4)
 
-    # ── Fondo ────────────────────────────────────────
     if bg_image_path and os.path.isfile(bg_image_path):
         try:
             bg  = Image.open(bg_image_path).convert("RGB")
@@ -294,6 +290,7 @@ def concat_segments_demuxer(segment_paths: List[str], out_path: str):
 def _process(
     payload: VideoRequest,
     audio_file_path: Optional[str],
+    image_file_path: Optional[str],
     x_api_key: Optional[str],
 ) -> FileResponse:
 
@@ -342,21 +339,20 @@ def _process(
     job_id    = str(uuid.uuid4())
     out_final = os.path.join(workdir, f"{job_id}.mp4")
 
-    # Imagen de fondo global
-    global_bg = resolve_bg_image(
+    # Imagen global: multipart > bgImageUrl > bgImageLocal > None (fondo negro)
+    global_bg = image_file_path or resolve_bg_image(
         payload.bgImageUrl, payload.bgImageLocal, workdir, job_id, "global"
     )
 
     seg_paths = []
     png_paths = []
-    tmp_files = list(filter(None, [audio_file_path]))
+    tmp_files = [f for f in [audio_file_path, image_file_path] if f]
 
     try:
         for i, (txt, dur, slide_bg_url, slide_bg_local) in enumerate(norm_slides):
             png_path = os.path.join(workdir, f"{job_id}_slide_{i:02d}.png")
             seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
 
-            # Fondo: propio del slide > global > negro
             slide_bg = resolve_bg_image(
                 slide_bg_url, slide_bg_local, workdir, job_id, f"slide{i}"
             ) if (slide_bg_url or slide_bg_local) else global_bg
@@ -389,7 +385,7 @@ def _process(
 
         concat_segments_demuxer(seg_paths, out_final)
 
-        # ── Resolver audio (prioridad: multipart > audioLocal > audioUrl) ──
+        # ── Audio (completamente opcional) ─────────────
         audio_path = audio_file_path
 
         if not audio_path and payload.audioLocal:
@@ -437,7 +433,6 @@ def _process(
             run(cmd)
             out_final = out_with_audio
 
-        # ── Nombre del archivo de salida ───────────────
         safe_out = safe_filename(payload.output or "") or "video"
         if not safe_out.endswith(".mp4"):
             safe_out += ".mp4"
@@ -469,8 +464,8 @@ def health():
 
 @app.post("/render")
 def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=None)):
-    """Endpoint JSON normal (sin audio multipart)."""
-    return _process(payload=payload, audio_file_path=None, x_api_key=x_api_key)
+    """JSON puro — sin archivos multipart."""
+    return _process(payload=payload, audio_file_path=None, image_file_path=None, x_api_key=x_api_key)
 
 
 @app.post("/render-with-audio")
@@ -479,14 +474,9 @@ async def render_video_with_audio(
     audio_file: UploadFile = File(...),
     x_api_key:  str | None = Header(default=None),
 ):
-    """
-    Endpoint multipart/form-data para subir MP3 desde n8n.
-      - payload:    JSON string con los mismos campos que VideoRequest
-      - audio_file: archivo MP3 / AAC / WAV
-    """
+    """Audio obligatorio vía multipart."""
     try:
-        data = json.loads(payload)
-        req  = VideoRequest(**data)
+        req = VideoRequest(**json.loads(payload))
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"payload JSON inválido: {e}")
 
@@ -494,9 +484,58 @@ async def render_video_with_audio(
     os.makedirs(workdir, exist_ok=True)
     ext       = os.path.splitext(audio_file.filename or ".mp3")[1] or ".mp3"
     tmp_audio = os.path.join(workdir, f"{uuid.uuid4()}_upload{ext}")
-
-    contents = await audio_file.read()
+    contents  = await audio_file.read()
     with open(tmp_audio, "wb") as f:
         f.write(contents)
 
-    return _process(payload=req, audio_file_path=tmp_audio, x_api_key=x_api_key)
+    return _process(payload=req, audio_file_path=tmp_audio, image_file_path=None, x_api_key=x_api_key)
+
+
+@app.post("/render-with-image")
+async def render_video_with_image(
+    payload:    str                           = Form(...),
+    bg_image:   Optional[UploadFile]          = File(default=None),
+    audio_file: Optional[UploadFile]          = File(default=None),
+    x_api_key:  str | None                    = Header(default=None),
+):
+    """
+    Imagen de fondo OPCIONAL vía multipart.
+    Audio OPCIONAL vía multipart.
+    Si no se envía ninguno → fondo negro, sin audio.
+    Si solo viene imagen → fondo con imagen, sin audio.
+    Si vienen ambos → fondo con imagen + audio.
+    """
+    try:
+        req = VideoRequest(**json.loads(payload))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"payload JSON inválido: {e}")
+
+    workdir = "/tmp/ffmpeg"
+    os.makedirs(workdir, exist_ok=True)
+    job_id  = str(uuid.uuid4())
+
+    # Imagen opcional
+    tmp_image = None
+    if bg_image and bg_image.filename:
+        img_ext   = os.path.splitext(bg_image.filename)[1] or ".png"
+        tmp_image = os.path.join(workdir, f"{job_id}_bg{img_ext}")
+        img_bytes = await bg_image.read()
+        if img_bytes:
+            with open(tmp_image, "wb") as f:
+                f.write(img_bytes)
+        else:
+            tmp_image = None
+
+    # Audio opcional
+    tmp_audio = None
+    if audio_file and audio_file.filename:
+        aud_ext   = os.path.splitext(audio_file.filename)[1] or ".mp3"
+        tmp_audio = os.path.join(workdir, f"{job_id}_audio{aud_ext}")
+        aud_bytes = await audio_file.read()
+        if aud_bytes:
+            with open(tmp_audio, "wb") as f:
+                f.write(aud_bytes)
+        else:
+            tmp_audio = None
+
+    return _process(payload=req, audio_file_path=tmp_audio, image_file_path=tmp_image, x_api_key=x_api_key)
