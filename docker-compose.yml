@@ -42,38 +42,14 @@ services:
       - internal_net
 
   piper-tts:
-    image: artibex/piper-http:latest
+    build:
+      context: ./piper-tts
+      dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
+      - PIPER_MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
       - ./piper_models:/app/models:rw
-    command:
-      - sh
-      - -lc
-      - |
-        set -e
-        echo "[piper] MODEL_DOWNLOAD_LINK=$MODEL_DOWNLOAD_LINK"
-        mkdir -p /app/models
-
-        echo "[piper] downloading model.onnx ..."
-        python -c "import os,urllib.request; u=os.environ['MODEL_DOWNLOAD_LINK'].strip(); urllib.request.urlretrieve(u, '/app/models/model.onnx'); print('ok: model.onnx')"
-
-        echo "[piper] downloading model.onnx.json ..."
-        python -c "import os,urllib.request; u=os.environ['MODEL_DOWNLOAD_LINK'].strip(); ju=u.replace('.onnx?download=true','.onnx.json').replace('.onnx?download=1','.onnx.json'); ju = ju if ju!=u else u.replace('.onnx','.onnx.json'); urllib.request.urlretrieve(ju, '/app/models/model.onnx.json'); print('ok: model.onnx.json')"
-
-        echo "[piper] patching phoneme_type if needed ..."
-        python -c "import json; p='/app/models/model.onnx.json'; cfg=json.load(open(p,'r',encoding='utf-8')); \
-pt=cfg.get('phoneme_type'); \
-(cfg.__setitem__('phoneme_type','espeak') if pt=='PhonemeType.ESPEAK' else None); \
-json.dump(cfg, open(p,'w',encoding='utf-8'), ensure_ascii=False); \
-print('phoneme_type:', cfg.get('phoneme_type'))"
-
-        echo "[piper] files in /app/models:"
-        ls -la /app/models
-
-        echo "[piper] starting server :5000 ..."
-        python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
     networks:
       - internal_net
 
