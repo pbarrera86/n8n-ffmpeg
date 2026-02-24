@@ -45,7 +45,20 @@ services:
     environment:
       - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
-      - ./piper_models:/models:rw
+      - ./piper_models:/app/models:rw
+    command: >
+      sh -lc "
+      # espera un poco por si está descargando
+      sleep 2;
+
+      # Parchea el JSON (si existe) para que Piper lo acepte
+      if [ -f /app/models/model.onnx.json ]; then
+        sed -i 's/\"phoneme_type\"[[:space:]]*:[[:space:]]*\"PhonemeType\\.ESPEAK\"/\"phoneme_type\": \"espeak\"/g' /app/models/model.onnx.json;
+      fi;
+
+      # Arranca el servidor HTTP de Piper
+      python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
+      "
     networks:
       - internal_net
       
