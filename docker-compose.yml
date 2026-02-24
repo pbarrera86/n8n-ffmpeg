@@ -28,6 +28,9 @@ services:
       - IMAGE_DIR=/images
       - FONT_FILE=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
       - FONT_FILE_REGULAR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+      - TTS_DEFAULT_VOICE=es-la
+      - TTS_DEFAULT_SPEED=170
+      - TTS_DEFAULT_VOLUME=100
     volumes:
       - ./audios:/audio:rw
       - ./images:/images:rw
