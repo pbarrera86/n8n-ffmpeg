@@ -56,23 +56,23 @@ services:
         echo "[piper] MODEL_DOWNLOAD_LINK=$MODEL_DOWNLOAD_LINK"
         mkdir -p /app/models
 
-        echo "[piper] downloading model + json if missing..."
-        python -c "import os,sys,urllib.request; u=os.environ.get('MODEL_DOWNLOAD_LINK','').strip(); \
-assert u, 'MODEL_DOWNLOAD_LINK empty'; mp='/app/models/model.onnx'; jp='/app/models/model.onnx.json'; \
-ju=u.replace('.onnx?download=true','.onnx.json').replace('.onnx?download=1','.onnx.json'); \
-ju = (ju if ju!=u else u.replace('.onnx','.onnx.json')); \
-d=lambda url,path: (print('Downloading',url,'->',path), urllib.request.urlretrieve(url,path)); \
-(os.path.exists(mp) or d(u,mp)); (os.path.exists(jp) or d(ju,jp)); \
-print('Files:', os.listdir('/app/models'))"
+        echo "[piper] downloading model.onnx ..."
+        python -c "import os,urllib.request; u=os.environ['MODEL_DOWNLOAD_LINK'].strip(); urllib.request.urlretrieve(u, '/app/models/model.onnx'); print('ok: model.onnx')"
 
-        echo "[piper] patching phoneme_type if needed..."
+        echo "[piper] downloading model.onnx.json ..."
+        python -c "import os,urllib.request; u=os.environ['MODEL_DOWNLOAD_LINK'].strip(); ju=u.replace('.onnx?download=true','.onnx.json').replace('.onnx?download=1','.onnx.json'); ju = ju if ju!=u else u.replace('.onnx','.onnx.json'); urllib.request.urlretrieve(ju, '/app/models/model.onnx.json'); print('ok: model.onnx.json')"
+
+        echo "[piper] patching phoneme_type if needed ..."
         python -c "import json; p='/app/models/model.onnx.json'; cfg=json.load(open(p,'r',encoding='utf-8')); \
 pt=cfg.get('phoneme_type'); \
 (cfg.__setitem__('phoneme_type','espeak') if pt=='PhonemeType.ESPEAK' else None); \
 json.dump(cfg, open(p,'w',encoding='utf-8'), ensure_ascii=False); \
 print('phoneme_type:', cfg.get('phoneme_type'))"
 
-        echo "[piper] starting server on :5000 ..."
+        echo "[piper] files in /app/models:"
+        ls -la /app/models
+
+        echo "[piper] starting server :5000 ..."
         python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
     networks:
       - internal_net
