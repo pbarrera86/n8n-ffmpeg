@@ -50,6 +50,7 @@ class VideoRequest(BaseModel):
     boxAlpha:       float = 0.55
     boxBorder:      int   = 40
 
+    output:         Optional[str] = None
     audioLocal:     Optional[str] = None
     audioUrl:       Optional[str] = None
     audioVolume:    float = 0.9
@@ -414,7 +415,10 @@ def render_video(payload: VideoRequest, x_api_key: str | None = Header(default=N
             run(cmd)
             out_final = out_with_audio
 
-        return FileResponse(out_final, media_type="video/mp4", filename="video.mp4")
+       safe_out = safe_filename(payload.output or "") or "video"
+        if not safe_out.endswith(".mp4"):
+            safe_out += ".mp4"
+        return FileResponse(out_final, media_type="video/mp4", filename=safe_out)
 
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
