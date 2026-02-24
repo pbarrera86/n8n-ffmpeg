@@ -46,16 +46,16 @@ services:
       - MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
       - ./piper_models:/models:rw
-    command: ["python", "/app/run.py", "${PIPER_MODEL_DOWNLOAD_LINK}", "/models"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/voices >/dev/null 2>&1 || exit 1"]
+      # Checa que el puerto 5000 esté escuchando (no depende de endpoints)
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',5000)); s.close()\""]
       interval: 20s
       timeout: 10s
       retries: 10
-      start_period: 60s
+      start_period: 120s
     networks:
       - internal_net
-
+      
   n8n:
     image: ghcr.io/pbarrera86/n8n-ffmpeg:2.6.3
     restart: unless-stopped
