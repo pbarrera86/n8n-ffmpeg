@@ -52,22 +52,63 @@ services:
       - sh
       - -lc
       - |
-        echo "[piper] waiting for model files...";
-        i=0;
-        while [ ! -f /app/models/model.onnx.json ] && [ $i -lt 120 ]; do
-          i=$((i+1));
-          sleep 1;
-        done;
+        set -e
+        echo "[piper] MODEL_DOWNLOAD_LINK=$MODEL_DOWNLOAD_LINK"
+        mkdir -p /app/models
 
-        if [ -f /app/models/model.onnx.json ]; then
-          echo "[piper] patching phoneme_type...";
-          sed -i 's/"phoneme_type"[[:space:]]*:[[:space:]]*"PhonemeType\.ESPEAK"/"phoneme_type": "espeak"/g' /app/models/model.onnx.json;
-        else
-          echo "[piper] model.onnx.json NOT found after waiting. Listing /app/models:";
-          ls -la /app/models || true;
-        fi;
+        echo "[piper] downloading model + json (if missing)..."
+        python - <<'PY'
+import os, urllib.request, sys
 
-        echo "[piper] starting server...";
+model_url = os.environ.get("MODEL_DOWNLOAD_LINK","").strip()
+if not model_url:
+    print("MODEL_DOWNLOAD_LINK is empty"); sys.exit(1)
+
+model_path = "/app/models/model.onnx"
+json_path  = "/app/models/model.onnx.json"
+
+# Deriva URL del JSON
+# Ej: .../es_MX-ald-medium.onnx?download=true  -> .../es_MX-ald-medium.onnx.json
+json_url = model_url.replace(".onnx?download=true", ".onnx.json").replace(".onnx?download=1", ".onnx.json")
+if json_url == model_url:
+    # si viene sin ?download=true, intenta simple
+    json_url = model_url.replace(".onnx", ".onnx.json")
+
+def download(url, path):
+    print(f"Downloading {url} -> {path}")
+    urllib.request.urlretrieve(url, path)
+
+if not os.path.exists(model_path):
+    download(model_url, model_path)
+else:
+    print("Model already exists:", model_path)
+
+if not os.path.exists(json_path):
+    download(json_url, json_path)
+else:
+    print("Config already exists:", json_path)
+
+print("Files in /app/models:", os.listdir("/app/models"))
+PY
+
+        echo "[piper] patching phoneme_type (PhonemeType.ESPEAK -> espeak) ..."
+        python - <<'PY'
+import json, os
+p = "/app/models/model.onnx.json"
+with open(p, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+pt = cfg.get("phoneme_type")
+if pt == "PhonemeType.ESPEAK":
+    cfg["phoneme_type"] = "espeak"
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False)
+    print("patched phoneme_type to espeak")
+else:
+    print("phoneme_type is:", pt)
+PY
+
+        echo "[piper] starting server on :5000 ..."
         python -m piper.http_server --model /app/models/model.onnx --config /app/models/model.onnx.json --host 0.0.0.0 --port 5000
     networks:
       - internal_net
