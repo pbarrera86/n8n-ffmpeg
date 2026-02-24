@@ -23,10 +23,12 @@ services:
     environment:
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
       - AUDIO_DIR=/audio
+      - IMAGE_DIR=/images                                        # ← NUEVO
       - FONT_FILE=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
       - FONT_FILE_REGULAR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
     volumes:
       - ./audios:/audio:rw
+      - ./images:/images:rw                                      # ← NUEVO
       - ffmpeg_tmp:/tmp/ffmpeg
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
