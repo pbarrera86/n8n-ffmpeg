@@ -474,6 +474,7 @@ def _process(
             audio_path = tmp_audio
             tmp_files.append(tmp_audio)
 
+        # ✅ FIX robusto de audio: resample + stereo + loudnorm (para que sí se escuche)
         if audio_path:
             out_with_audio = os.path.join(workdir, f"{job_id}_audio.mp4")
             fade_out   = max(0, int(payload.audioFadeOutSec or 0))
@@ -482,7 +483,10 @@ def _process(
             audio_filters = [
                 f"atrim=0:{total_duration}",
                 "asetpts=PTS-STARTPTS",
+                "aresample=44100",
+                "aformat=channel_layouts=stereo",
                 f"volume={float(payload.audioVolume):.3f}",
+                "loudnorm=I=-16:TP=-1.5:LRA=11",
             ]
             if fade_out > 0:
                 audio_filters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
@@ -495,7 +499,10 @@ def _process(
                 "-map", "0:v:0",
                 "-map", "[aout]",
                 "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "44100",
+                "-ac", "2",
                 "-shortest",
                 "-movflags", "+faststart",
                 out_with_audio
@@ -612,14 +619,24 @@ async def render_video_with_audio(
 
 @app.post("/render-with-image")
 async def render_video_with_image(
-    payload:    str                           = Form(...),
-    bg_image:   Optional[UploadFile]          = File(default=None),
-    audio_file: Optional[UploadFile]          = File(default=None),
-    x_api_key:  str | None                    = Header(default=None),
+    payload:    str                  = Form(...),
+
+    # ✅ Acepta bg_image o image (por si n8n manda otro nombre)
+    bg_image:   Optional[UploadFile]  = File(default=None),
+    image:      Optional[UploadFile]  = File(default=None),
+
+    # ✅ Acepta audio_file o audio (n8n a veces manda "audio")
+    audio_file: Optional[UploadFile]  = File(default=None),
+    audio:      Optional[UploadFile]  = File(default=None),
+
+    x_api_key:  str | None            = Header(default=None),
 ):
     """
     Imagen de fondo OPCIONAL vía multipart.
     Audio OPCIONAL vía multipart.
+    Campos soportados:
+      - imagen: bg_image | image
+      - audio:  audio_file | audio
     Si no se envía ninguno → fondo negro, sin audio.
     Si solo viene imagen → fondo con imagen, sin audio.
     Si vienen ambos → fondo con imagen + audio.
@@ -633,24 +650,28 @@ async def render_video_with_image(
     ensure_dir(workdir)
     job_id  = str(uuid.uuid4())
 
-    # Imagen opcional
+    # ---------- Imagen ----------
     tmp_image = None
-    if bg_image and bg_image.filename:
-        img_ext   = os.path.splitext(bg_image.filename)[1] or ".png"
+    img_up = bg_image if (bg_image and bg_image.filename) else (image if (image and image.filename) else None)
+
+    if img_up and img_up.filename:
+        img_ext   = os.path.splitext(img_up.filename)[1] or ".png"
         tmp_image = os.path.join(workdir, f"{job_id}_bg{img_ext}")
-        img_bytes = await bg_image.read()
+        img_bytes = await img_up.read()
         if img_bytes:
             with open(tmp_image, "wb") as f:
                 f.write(img_bytes)
         else:
             tmp_image = None
 
-    # Audio opcional
+    # ---------- Audio ----------
     tmp_audio = None
-    if audio_file and audio_file.filename:
-        aud_ext   = os.path.splitext(audio_file.filename)[1] or ".mp3"
+    aud_up = audio_file if (audio_file and audio_file.filename) else (audio if (audio and audio.filename) else None)
+
+    if aud_up and aud_up.filename:
+        aud_ext   = os.path.splitext(aud_up.filename)[1] or ".wav"
         tmp_audio = os.path.join(workdir, f"{job_id}_audio{aud_ext}")
-        aud_bytes = await audio_file.read()
+        aud_bytes = await aud_up.read()
         if aud_bytes:
             with open(tmp_audio, "wb") as f:
                 f.write(aud_bytes)
