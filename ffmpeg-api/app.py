@@ -3,9 +3,9 @@ import uuid
 import subprocess
 import re
 import unicodedata
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
-from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -354,6 +354,52 @@ def concat_segments_demuxer(segment_paths: List[str], out_path: str):
         pass
 
 
+def mux_audio_into_segment(
+    video_path: str,
+    audio_path: str,
+    out_path: str,
+    seg_duration: int,
+    audio_volume: float,
+    audio_fade_out_sec: int,
+):
+    """
+    Mezcla audio en un segmento (duración seg_duration).
+    Re-usa tu enfoque robusto: resample + stereo + loudnorm + fade opcional.
+    """
+    fade_out   = max(0, int(audio_fade_out_sec or 0))
+    fade_out   = min(fade_out, seg_duration)  # no exceder
+    fade_start = max(0, seg_duration - fade_out)
+
+    audio_filters = [
+        f"atrim=0:{seg_duration}",
+        "asetpts=PTS-STARTPTS",
+        "aresample=44100",
+        "aformat=channel_layouts=stereo",
+        f"volume={float(audio_volume):.3f}",
+        "loudnorm=I=-16:TP=-1.5:LRA=11",
+    ]
+    if fade_out > 0 and seg_duration > 0:
+        audio_filters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-filter_complex", f"[1:a]{','.join(audio_filters)}[aout]",
+        "-map", "0:v:0",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-shortest",
+        "-movflags", "+faststart",
+        out_path
+    ]
+    run(cmd)
+
+
 # ─────────────────────────────────────────────
 # Lógica central compartida
 # ─────────────────────────────────────────────
@@ -362,6 +408,9 @@ def _process(
     audio_file_path: Optional[str],
     image_file_path: Optional[str],
     x_api_key: Optional[str],
+    slide_bg_files: Optional[Dict[int, str]] = None,
+    slide_audio_files: Optional[Dict[int, str]] = None,
+    extra_tmp_files: Optional[List[str]] = None,
 ) -> FileResponse:
 
     if API_KEY:
@@ -409,7 +458,10 @@ def _process(
     job_id    = str(uuid.uuid4())
     out_final = os.path.join(workdir, f"{job_id}.mp4")
 
-    # Imagen global: multipart > bgImageUrl > bgImageLocal > None (fondo negro)
+    slide_bg_files = slide_bg_files or {}
+    slide_audio_files = slide_audio_files or {}
+
+    # Imagen global: multipart global (image_file_path) > bgImageUrl > bgImageLocal > None
     global_bg = image_file_path or resolve_bg_image(
         payload.bgImageUrl, payload.bgImageLocal, workdir, job_id, "global"
     )
@@ -417,15 +469,24 @@ def _process(
     seg_paths = []
     png_paths = []
     tmp_files = [f for f in [audio_file_path, image_file_path] if f]
+    if extra_tmp_files:
+        tmp_files.extend([p for p in extra_tmp_files if p])
 
     try:
         for i, (txt, dur, slide_bg_url, slide_bg_local) in enumerate(norm_slides):
             png_path = os.path.join(workdir, f"{job_id}_slide_{i:02d}.png")
             seg_path = os.path.join(workdir, f"{job_id}_seg_{i:02d}.mp4")
 
-            slide_bg = resolve_bg_image(
-                slide_bg_url, slide_bg_local, workdir, job_id, f"slide{i}"
-            ) if (slide_bg_url or slide_bg_local) else global_bg
+            # Prioridad fondo:
+            # 1) bg_i por multipart
+            # 2) slide.bgImageUrl / slide.bgImageLocal
+            # 3) global_bg
+            if i in slide_bg_files and slide_bg_files[i]:
+                slide_bg = slide_bg_files[i]
+            else:
+                slide_bg = resolve_bg_image(
+                    slide_bg_url, slide_bg_local, workdir, job_id, f"slide{i}"
+                ) if (slide_bg_url or slide_bg_local) else global_bg
 
             render_slide_png(
                 out_png        = png_path,
@@ -451,11 +512,30 @@ def _process(
                 height   = payload.height,
                 fps      = payload.fps,
             )
-            seg_paths.append(seg_path)
+
+            # Si existe aud_i, lo mezclamos en este segmento ANTES de concatenar
+            if i in slide_audio_files and slide_audio_files[i]:
+                seg_with_audio = os.path.join(workdir, f"{job_id}_seg_{i:02d}_aud.mp4")
+                mux_audio_into_segment(
+                    video_path=seg_path,
+                    audio_path=slide_audio_files[i],
+                    out_path=seg_with_audio,
+                    seg_duration=dur,
+                    audio_volume=float(payload.audioVolume),
+                    audio_fade_out_sec=int(payload.audioFadeOutSec or 0),
+                )
+                seg_paths.append(seg_with_audio)
+                tmp_files.append(seg_with_audio)
+                tmp_files.append(seg_path)  # limpiar el sin audio (ya no se usará)
+            else:
+                seg_paths.append(seg_path)
 
         concat_segments_demuxer(seg_paths, out_final)
 
-        # ── Audio (completamente opcional) ─────────────
+        # ── Audio global (completamente opcional) ─────────────
+        # Si ya venían aud_i por slide, normalmente NO necesitas audio global.
+        # Pero si mandas audio global (multipart o payload.*) y quieres que exista,
+        # se aplicará al video final (sin romper tu comportamiento actual).
         audio_path = audio_file_path
 
         if not audio_path and payload.audioLocal:
@@ -474,7 +554,7 @@ def _process(
             audio_path = tmp_audio
             tmp_files.append(tmp_audio)
 
-        # ✅ FIX robusto de audio: resample + stereo + loudnorm (para que sí se escuche)
+        # ✅ FIX robusto de audio global: resample + stereo + loudnorm
         if audio_path:
             out_with_audio = os.path.join(workdir, f"{job_id}_audio.mp4")
             fade_out   = max(0, int(payload.audioFadeOutSec or 0))
@@ -520,15 +600,16 @@ def _process(
 
     finally:
         # OJO: no borramos out_final aquí para no romper FileResponse.
-        # Limpieza de PNG/temporales:
         for p in png_paths:
             try:
                 os.remove(p)
             except Exception:
                 pass
+        # Limpieza de temporales
         for p in tmp_files:
             try:
-                os.remove(p)
+                if p and os.path.isfile(p):
+                    os.remove(p)
             except Exception:
                 pass
 
@@ -637,9 +718,6 @@ async def render_video_with_image(
     Campos soportados:
       - imagen: bg_image | image
       - audio:  audio_file | audio
-    Si no se envía ninguno → fondo negro, sin audio.
-    Si solo viene imagen → fondo con imagen, sin audio.
-    Si vienen ambos → fondo con imagen + audio.
     """
     try:
         req = VideoRequest(**json.loads(payload))
@@ -679,3 +757,101 @@ async def render_video_with_image(
             tmp_audio = None
 
     return _process(payload=req, audio_file_path=tmp_audio, image_file_path=tmp_image, x_api_key=x_api_key)
+
+
+# ─────────────────────────────────────────────
+# NUEVO: /render-slides-multi
+# ─────────────────────────────────────────────
+@app.post("/render-slides-multi")
+async def render_slides_multi(request: Request, x_api_key: str | None = Header(default=None)):
+    """
+    1) JSON puro (application/json): igual que /render
+    2) multipart/form-data:
+        - payload: JSON (string)  [REQUERIDO]
+        - bg_0..bg_N: imágenes opcionales por slide
+        - aud_0..aud_N: audios opcionales por slide
+    """
+    ctype = (request.headers.get("content-type") or "").lower()
+
+    # --- Modo JSON puro ---
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+            req = VideoRequest(**body)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"JSON inválido: {e}")
+
+        return _process(
+            payload=req,
+            audio_file_path=None,
+            image_file_path=None,
+            x_api_key=x_api_key,
+            slide_bg_files=None,
+            slide_audio_files=None,
+            extra_tmp_files=None,
+        )
+
+    # --- Modo multipart ---
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+
+        payload_str = form.get("payload")
+        if not payload_str:
+            raise HTTPException(status_code=422, detail="payload (Form) es requerido para multipart")
+
+        try:
+            req = VideoRequest(**json.loads(payload_str))
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"payload JSON inválido: {e}")
+
+        slides_count = len(req.slides or [])
+        if slides_count == 0 and (req.caption or "").strip():
+            slides_count = 1  # compat: caption -> 1 slide
+
+        workdir = "/tmp/ffmpeg"
+        ensure_dir(workdir)
+        job_id = str(uuid.uuid4())
+
+        slide_bg_files: Dict[int, str] = {}
+        slide_audio_files: Dict[int, str] = {}
+        extra_tmp_files: List[str] = []
+
+        # Leer bg_i / aud_i dinámicos del form
+        # Nota: FastAPI Starlette FormData puede traer UploadFile
+        for i in range(max(slides_count, 0)):
+            bg_key = f"bg_{i}"
+            aud_key = f"aud_{i}"
+
+            bg_up = form.get(bg_key)
+            if isinstance(bg_up, UploadFile) and bg_up.filename:
+                img_ext = os.path.splitext(bg_up.filename)[1] or ".png"
+                tmp_img = os.path.join(workdir, f"{job_id}_bg_{i}{img_ext}")
+                img_bytes = await bg_up.read()
+                if img_bytes:
+                    with open(tmp_img, "wb") as f:
+                        f.write(img_bytes)
+                    slide_bg_files[i] = tmp_img
+                    extra_tmp_files.append(tmp_img)
+
+            aud_up = form.get(aud_key)
+            if isinstance(aud_up, UploadFile) and aud_up.filename:
+                aud_ext = os.path.splitext(aud_up.filename)[1] or ".wav"
+                tmp_aud = os.path.join(workdir, f"{job_id}_aud_{i}{aud_ext}")
+                aud_bytes = await aud_up.read()
+                if aud_bytes:
+                    with open(tmp_aud, "wb") as f:
+                        f.write(aud_bytes)
+                    slide_audio_files[i] = tmp_aud
+                    extra_tmp_files.append(tmp_aud)
+
+        return _process(
+            payload=req,
+            audio_file_path=None,     # audio global opcional NO se manda aquí (pero puedes seguir usando /render-with-image si quieres)
+            image_file_path=None,     # imagen global opcional idem
+            x_api_key=x_api_key,
+            slide_bg_files=slide_bg_files,
+            slide_audio_files=slide_audio_files,
+            extra_tmp_files=extra_tmp_files,
+        )
+
+    raise HTTPException(status_code=415, detail="Unsupported Content-Type. Use application/json o multipart/form-data")
