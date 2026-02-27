@@ -1,0 +1,16 @@
+fastapi==0.115.6
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+
+# Diffusers stack
+diffusers==0.30.3
+transformers==4.44.2
+accelerate==0.34.2
+safetensors==0.4.4
+
+# CPU torch
+torch==2.3.1
+torchvision==0.18.1
+
+Pillow==10.4.0
+numpy==2.0.1
