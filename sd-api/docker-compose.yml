@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  sd-image-api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: sd-image-api
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    environment:
+      # Modelo por defecto (SD 1.5)
+      - MODEL_ID=runwayml/stable-diffusion-v1-5
+
+      # Carpeta donde guardaremos imágenes
+      - OUTPUT_DIR=/data/outputs
+
+      # Si HuggingFace te pide autorización/aceptar términos:
+      # crea un token en HF y ponlo aquí o en un .env
+      # - HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+      # Ajustes CPU / memoria
+      - MAX_IMAGE_SIDE=512
+      - DEFAULT_STEPS=20
+      - DEFAULT_GUIDANCE=7.0
+    volumes:
+      - ./data:/data
+      # Cache de modelos HuggingFace (evita re-descargar)
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health').read()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  hf_cache:
