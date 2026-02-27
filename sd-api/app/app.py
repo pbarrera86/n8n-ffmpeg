@@ -1,6 +1,8 @@
 import os
 import time
 import uuid
+import base64
+import io
 from typing import Optional
 
 import torch
@@ -44,14 +46,13 @@ class GenerateResponse(BaseModel):
     model_id: str
     took_seconds: float
     seed: int
-    images: list[str]  # file paths (relative)
+    images: list[str]  # base64 strings (data:image/png;base64,...)
 
 
 @app.on_event("startup")
 def load_model():
     global pipe
 
-    # CPU only (tu VPS)
     device = "cpu"
     torch_dtype = torch.float32
 
@@ -60,11 +61,10 @@ def load_model():
             MODEL_ID,
             torch_dtype=torch_dtype,
             use_safetensors=True,
-            safety_checker=None,  # <-- Si quieres filtro NSFW, quita esta línea (ver nota abajo)
+            safety_checker=None,
             token=HF_TOKEN,
         )
     except TypeError:
-        # compatibilidad por versiones: algunos usan "token" o "use_auth_token"
         pipe = StableDiffusionPipeline.from_pretrained(
             MODEL_ID,
             torch_dtype=torch_dtype,
@@ -79,10 +79,7 @@ def load_model():
             f"y/o configurar HF_TOKEN. Error: {e}"
         )
 
-    # Scheduler más estable/rápido en muchos casos
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-
-    # Optimización de memoria en CPU
     pipe.enable_attention_slicing("max")
     pipe = pipe.to(device)
 
@@ -98,11 +95,8 @@ def generate(req: GenerateRequest):
     if pipe is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
-    # Limitar tamaño (para que 8GB RAM no muera)
     w = min(req.width, MAX_IMAGE_SIDE)
     h = min(req.height, MAX_IMAGE_SIDE)
-
-    # Mantén múltiplos de 8 (requisito típico)
     w = (w // 8) * 8
     h = (h // 8) * 8
 
@@ -129,15 +123,23 @@ def generate(req: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"Generation error: {e}")
 
     images = out.images  # list[PIL.Image]
-    rel_paths = []
+    b64_images = []
+
     for img in images:
         if not isinstance(img, Image.Image):
             continue
+
+        # --- CAMBIO: guardar en disco Y devolver base64 ---
         file_id = str(uuid.uuid4())
         filename = f"{file_id}.png"
         path = os.path.join(OUTPUT_DIR, filename)
         img.save(path, format="PNG", optimize=True)
-        rel_paths.append(f"outputs/{filename}")
+
+        # Convertir a base64
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        b64_images.append(f"data:image/png;base64,{b64}")
 
     took = time.time() - start
 
@@ -145,5 +147,5 @@ def generate(req: GenerateRequest):
         model_id=MODEL_ID,
         took_seconds=round(took, 3),
         seed=seed,
-        images=rel_paths,
+        images=b64_images,
     )
