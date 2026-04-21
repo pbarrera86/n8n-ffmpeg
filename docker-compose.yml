@@ -57,7 +57,7 @@ services:
       - internal_net
 
   n8n:
-    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.15.0
+    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.16.1
     restart: unless-stopped
     environment:
       - DB_TYPE=postgresdb
