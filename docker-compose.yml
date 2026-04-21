@@ -22,6 +22,7 @@ services:
       context: ./ffmpeg-api
       dockerfile: Dockerfile
     restart: unless-stopped
+    pull_policy: build
     environment:
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
       - AUDIO_DIR=/audio
@@ -49,6 +50,7 @@ services:
       context: ./piper-tts
       dockerfile: Dockerfile
     restart: unless-stopped
+    pull_policy: build
     environment:
       - PIPER_MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
@@ -58,6 +60,7 @@ services:
 
   n8n:
     image: ghcr.io/pbarrera86/n8n-ffmpeg:2.16.1
+    pull_policy: always
     restart: unless-stopped
     environment:
       - DB_TYPE=postgresdb
