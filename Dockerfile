@@ -5,11 +5,11 @@ RUN apk add --no-cache curl xz
 ARG FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
 
 RUN mkdir -p /opt/ffmpeg \
- && curl -L "$FFMPEG_URL" | tar -xJ --strip-components=1 -C /opt/ffmpeg \
- && chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe
+    && curl -L "$FFMPEG_URL" | tar -xJ --strip-components=1 -C /opt/ffmpeg \
+    && chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe
 
 # ===== Stage 2: n8n estable =====
-FROM docker.n8n.io/n8nio/n8n:2.15.0
+FROM docker.n8n.io/n8nio/n8n:2.16.1
 
 USER root
 COPY --from=ffmpeg /opt/ffmpeg/ffmpeg /usr/local/bin/ffmpeg
