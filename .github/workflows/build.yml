@@ -1,0 +1,86 @@
+name: Build and Push n8n-ffmpeg
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - '.github/workflows/**'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/n8n-ffmpeg
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from Dockerfile
+        id: version
+        run: |
+          VERSION=$(grep 'FROM docker.n8n.io/n8nio/n8n:' Dockerfile | grep -oP '\d+\.\d+\.\d+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected n8n version: $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Clean Docker cache before build
+        run: |
+          docker system prune -af --volumes
+          docker buildx prune -af
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          dockerfile: Dockerfile
+          push: true
+          no-cache: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Clean Docker cache after build
+        if: always()
+        run: |
+          docker system prune -af --volumes
+          docker buildx prune -af
+
+      - name: Delete old versions from registry
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: n8n-ffmpeg
+          package-type: container
+          min-versions-to-keep: 2
+          delete-only-untagged-versions: false
+        continue-on-error: true
+
+      - name: Summary
+        run: |
+          echo "## ✅ Build completado" >> $GITHUB_STEP_SUMMARY
+          echo "- **Imagen:** ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag latest:** ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cache limpiado:** ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Versiones antiguas eliminadas:** ✅" >> $GITHUB_STEP_SUMMARY
