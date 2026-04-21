@@ -32,8 +32,8 @@ services:
       - TTS_DEFAULT_SPEED=170
       - TTS_DEFAULT_VOLUME=100
     volumes:
-      - ./audios:/audio:rw
-      - ./images:/images:rw
+      - ffmpeg_audios:/audio:rw
+      - ffmpeg_images:/images:rw
       - ffmpeg_tmp:/tmp/ffmpeg
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
@@ -52,7 +52,7 @@ services:
     environment:
       - PIPER_MODEL_DOWNLOAD_LINK=${PIPER_MODEL_DOWNLOAD_LINK}
     volumes:
-      - ./piper_models:/app/models:rw
+      - piper_models:/app/models:rw
     networks:
       - internal_net
 
@@ -85,7 +85,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - TIKTOK_ACCESS_TOKEN=${TIKTOK_ACCESS_TOKEN}
       - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
-      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binaryData
+      - N8N_STORAGE_PATH=/home/node/.n8n/binaryData
       - N8N_PROXY_HOPS=1
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_USER_FOLDER=/home/node/.n8n
@@ -93,11 +93,19 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
       - tiktok_ai_data:/data/tiktok_ai
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
       ffmpeg-api:
         condition: service_healthy
+      piper-tts:
+        condition: service_started
     networks:
       - internal_net
 
@@ -106,6 +114,9 @@ volumes:
   postgres_data:
   tiktok_ai_data:
   ffmpeg_tmp:
+  ffmpeg_audios:
+  ffmpeg_images:
+  piper_models:
 
 networks:
   internal_net:
