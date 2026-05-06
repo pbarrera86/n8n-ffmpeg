@@ -85,11 +85,9 @@ services:
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_USER_FOLDER=/home/node/.n8n
 
-      # Recomendado para n8n 2.x
-      - N8N_RUNNERS_ENABLED=true
+      # En n8n 2.18.7 ya no pongas N8N_RUNNERS_ENABLED
       - N8N_RUNNERS_MODE=internal
 
-      # Ejecuciones / limpieza
       - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR}
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=${EXECUTIONS_DATA_SAVE_ON_SUCCESS}
       - EXECUTIONS_DATA_PRUNE=${EXECUTIONS_DATA_PRUNE}
@@ -97,11 +95,9 @@ services:
       - EXECUTIONS_DATA_PRUNE_MAX_COUNT=${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
       - N8N_CONCURRENCY_PRODUCTION_LIMIT=${N8N_CONCURRENCY_PRODUCTION_LIMIT}
 
-      # Binary data en filesystem
       - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
-      - N8N_STORAGE_PATH=/home/node/.n8n/binaryData
+      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binaryData
 
-      # APIs externas
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - TIKTOK_ACCESS_TOKEN=${TIKTOK_ACCESS_TOKEN}
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
@@ -127,6 +123,7 @@ services:
 
     networks:
       - internal_net
+      - dokploy-network
 
 volumes:
   n8n_data:
@@ -140,3 +137,6 @@ volumes:
 networks:
   internal_net:
     driver: bridge
+
+  dokploy-network:
+    external: true
