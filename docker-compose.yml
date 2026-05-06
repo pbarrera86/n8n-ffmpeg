@@ -59,7 +59,7 @@ services:
       - internal_net
 
   n8n:
-    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.16.1
+    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.18.7
     pull_policy: always
     restart: unless-stopped
     environment:
@@ -71,37 +71,52 @@ services:
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
       - DB_POSTGRESDB_SSL=false
       - DB_POSTGRESDB_SCHEMA=public
+
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - N8N_HOST=${N8N_HOST}
       - N8N_PORT=${N8N_PORT}
       - N8N_PROTOCOL=https
       - WEBHOOK_URL=https://${N8N_HOST}/
+
       - NODE_ENV=production
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - N8N_SECURE_COOKIE=true
+      - N8N_PROXY_HOPS=1
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_USER_FOLDER=/home/node/.n8n
+
+      # Recomendado para n8n 2.x
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=internal
+
+      # Ejecuciones / limpieza
       - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR}
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=${EXECUTIONS_DATA_SAVE_ON_SUCCESS}
       - EXECUTIONS_DATA_PRUNE=${EXECUTIONS_DATA_PRUNE}
       - EXECUTIONS_DATA_MAX_AGE=${EXECUTIONS_DATA_MAX_AGE}
       - EXECUTIONS_DATA_PRUNE_MAX_COUNT=${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
       - N8N_CONCURRENCY_PRODUCTION_LIMIT=${N8N_CONCURRENCY_PRODUCTION_LIMIT}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TIKTOK_ACCESS_TOKEN=${TIKTOK_ACCESS_TOKEN}
+
+      # Binary data en filesystem
       - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
       - N8N_STORAGE_PATH=/home/node/.n8n/binaryData
-      - N8N_PROXY_HOPS=1
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
-      - N8N_USER_FOLDER=/home/node/.n8n
+
+      # APIs externas
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TIKTOK_ACCESS_TOKEN=${TIKTOK_ACCESS_TOKEN}
       - FFMPEG_API_KEY=${FFMPEG_API_KEY}
+
     volumes:
       - n8n_data:/home/node/.n8n
       - tiktok_ai_data:/data/tiktok_ai
+
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 90s
+
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +124,7 @@ services:
         condition: service_healthy
       piper-tts:
         condition: service_started
+
     networks:
       - internal_net
 
