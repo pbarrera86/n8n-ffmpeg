@@ -9,7 +9,7 @@ RUN mkdir -p /opt/ffmpeg \
     && chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe
 
 # ===== Stage 2: n8n stable =====
-FROM docker.n8n.io/n8nio/n8n:2.36.7
+FROM n8nio/n8n:2.36.7
 
 USER root
 
