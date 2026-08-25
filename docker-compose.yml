@@ -46,7 +46,7 @@ services:
       - internal_net
 
   n8n:
-    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.18.7
+    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.36.7
     pull_policy: always
     restart: unless-stopped
     environment:
@@ -72,7 +72,7 @@ services:
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_USER_FOLDER=/home/node/.n8n
 
-      # En n8n 2.18.7 ya no pongas N8N_RUNNERS_ENABLED
+      # En n8n 2.36.7 ya no pongas N8N_RUNNERS_ENABLED
       - N8N_RUNNERS_MODE=internal
 
       - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR}
