@@ -33,7 +33,7 @@ jobs:
       - name: Extract version from Dockerfile
         id: version
         run: |
-          VERSION=$(grep 'FROM docker.n8n.io/n8nio/n8n:' Dockerfile | grep -oP '\d+\.\d+\.\d+')
+          VERSION=$(grep -E '^FROM (docker\.n8n\.io/)?n8nio/n8n:' Dockerfile | tail -n 1 | grep -oP '\d+\.\d+\.\d+')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Detected n8n version: $VERSION"
 
