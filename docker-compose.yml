@@ -46,7 +46,7 @@ services:
       - internal_net
 
   n8n:
-    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.36.7
+    image: ghcr.io/pbarrera86/n8n-ffmpeg:2.41.5
     pull_policy: always
     restart: unless-stopped
     environment:
